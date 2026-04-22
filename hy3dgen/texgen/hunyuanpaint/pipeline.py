@@ -147,8 +147,8 @@ class DDIMSolver:
         )
         # convert to torch tensors
         self.ddim_timesteps = torch.from_numpy(self.ddim_timesteps).long()
-        self.ddim_alpha_cumprods = torch.from_numpy(self.ddim_alpha_cumprods)
-        self.ddim_alpha_cumprods_prev = torch.from_numpy(self.ddim_alpha_cumprods_prev)
+        self.ddim_alpha_cumprods = torch.from_numpy(self.ddim_alpha_cumprods).float()
+        self.ddim_alpha_cumprods_prev = torch.from_numpy(self.ddim_alpha_cumprods_prev).float()
 
     def to(self, device):
         self.ddim_timesteps = self.ddim_timesteps.to(device)
@@ -219,7 +219,7 @@ class HunyuanPaintPipeline(StableDiffusionPipeline):
             scheduler.alphas_cumprod.numpy(),
             timesteps=scheduler.config.num_train_timesteps,
             ddim_timesteps=30,
-        ).to('cuda')
+        ).to('cpu')
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.is_turbo = False
@@ -288,7 +288,7 @@ class HunyuanPaintPipeline(StableDiffusionPipeline):
                     if img.shape[2] > 3:
                         alpha = img[:, :, 3:]
                         img = img[:, :, :3] * alpha + bg_c * (1 - alpha)
-                    img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).contiguous().half().to("cuda")
+                    img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).contiguous().half().to(device)
                     view_imgs.append(img)
                 view_imgs = torch.cat(view_imgs, dim=0)
                 images_tensor.append(view_imgs.unsqueeze(0))
@@ -595,9 +595,10 @@ class HunyuanPaintPipeline(StableDiffusionPipeline):
         if self.is_turbo:
             bsz = 3
             N_gen = 15
-            index = torch.range(29, 0, -bsz, device='cuda').long()
+            self.solver.to(device)
+            index = torch.arange(29, -1, -bsz, device=device).long()
             timesteps = self.solver.ddim_timesteps[index]
-            self.scheduler.set_timesteps(timesteps=timesteps.cpu(), device='cuda')
+            self.scheduler.set_timesteps(timesteps=timesteps.cpu(), device=device)
         else:
             timesteps, num_inference_steps = retrieve_timesteps(
                 self.scheduler, num_inference_steps, device, timesteps, sigmas

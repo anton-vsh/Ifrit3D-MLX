@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 class Hunyuan3DTexGenConfig:
 
     def __init__(self, light_remover_ckpt_path, multiview_ckpt_path, subfolder_name):
-        self.device = 'cuda'
+        # Prefer CUDA, then MPS, then CPU.
+        self.device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
         self.light_remover_ckpt_path = light_remover_ckpt_path
         self.multiview_ckpt_path = multiview_ckpt_path
 
@@ -46,8 +47,14 @@ class Hunyuan3DTexGenConfig:
         self.bake_exp = 4
         self.merge_method = 'fast'
 
-        self.pipe_dict = {'hunyuan3d-paint-v2-0': 'hunyuanpaint', 'hunyuan3d-paint-v2-0-turbo': 'hunyuanpaint-turbo'}
-        self.pipe_name = self.pipe_dict[subfolder_name]
+        self.pipe_dict = {
+            'hunyuan3d-paint-v2-0': 'hunyuanpaint',
+            'hunyuan3d-paint-v2-0-turbo': 'hunyuanpaint-turbo',
+            'hunyuan3d-paint-v2-1': 'hunyuanpaint',
+            'hunyuan3d-paintpbr-v2-1': 'hunyuanpaint',
+            'hunyuan3d-paint-v2-1-turbo': 'hunyuanpaint-turbo',
+        }
+        self.pipe_name = self.pipe_dict.get(subfolder_name, 'hunyuanpaint-turbo' if 'turbo' in subfolder_name else 'hunyuanpaint')
 
 
 class Hunyuan3DPaintPipeline:
@@ -91,13 +98,16 @@ class Hunyuan3DPaintPipeline:
         self.models = {}
         self.render = MeshRender(
             default_resolution=self.config.render_size,
-            texture_size=self.config.texture_size)
+            texture_size=self.config.texture_size,
+            device=self.config.device,
+            raster_mode='auto')
 
         self.load_models()
 
     def load_models(self):
-        # empty cude cache
-        torch.cuda.empty_cache()
+        # Empty CUDA cache only when CUDA is active.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         # Load model
         self.models['delight_model'] = Light_Shadow_Remover(self.config)
         self.models['multiview_model'] = Multiview_Diffusion_Net(self.config)
@@ -202,7 +212,11 @@ class Hunyuan3DPaintPipeline:
             
         images_prompt = [self.recenter_image(image_prompt) for image_prompt in images_prompt]
 
-        images_prompt = [self.models['delight_model'](image_prompt) for image_prompt in images_prompt]
+        # On MPS, the delight preprocessor can produce unstable outputs (noise).
+        # Skip it unless explicitly enabled.
+        use_delight = os.environ.get('HY3D_USE_DELIGHT', '0') == '1' and self.config.device != 'mps'
+        if use_delight:
+            images_prompt = [self.models['delight_model'](image_prompt) for image_prompt in images_prompt]
 
         mesh = mesh_uv_wrap(mesh)
 

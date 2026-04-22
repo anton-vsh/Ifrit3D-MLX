@@ -14,6 +14,8 @@
 
 import cv2
 import numpy as np
+import os
+import sys
 import torch
 import torch.nn.functional as F
 import trimesh
@@ -123,8 +125,15 @@ class MeshRender():
         camera_distance=1.45, camera_type='orth',
         default_resolution=1024, texture_size=1024,
         use_antialias=True, max_mip_level=None, filter_mode='linear',
-        bake_mode='linear', raster_mode='cr', device='cuda'):
+        bake_mode='linear', raster_mode='auto', device='auto'):
 
+        if device == 'auto':
+            if torch.cuda.is_available():
+                device = 'cuda'
+            elif torch.backends.mps.is_available():
+                device = 'mps'
+            else:
+                device = 'cpu'
         self.device = device
 
         self.set_default_render_resolution(default_resolution)
@@ -141,11 +150,31 @@ class MeshRender():
         self.bake_mode = bake_mode
 
         self.raster_mode = raster_mode
-        if self.raster_mode == 'cr':
+        self.raster = None
+        self.glctx = None
+
+        # Prefer Metal diffrast on MPS/CPU, CUDA custom rasterizer on CUDA.
+        if self.raster_mode in ['auto', 'mtl']:
+            try:
+                import mtldiffrast.torch as dr
+            except Exception:
+                # Try local sibling repo checkout if package isn't installed.
+                repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../..'))
+                mtl_repo = os.path.join(repo_root, 'mtldiffrast')
+                if os.path.isdir(mtl_repo) and mtl_repo not in sys.path:
+                    sys.path.insert(0, mtl_repo)
+                import mtldiffrast.torch as dr
+            self.raster = dr
+            self.glctx = dr.MtlRasterizeContext()
+            self.raster_mode = 'mtl'
+
+        if self.raster is None and self.raster_mode in ['auto', 'cr']:
             import custom_rasterizer as cr
             self.raster = cr
-        else:
-            raise f'No raster named {self.raster_mode}'
+            self.raster_mode = 'cr'
+
+        if self.raster is None:
+            raise RuntimeError(f'No raster backend available for mode {raster_mode}')
 
         if camera_type == 'orth':
             self.ortho_scale = 1.2
@@ -160,7 +189,7 @@ class MeshRender():
                 0.01, 100.0
             )
         else:
-            raise f'No camera type {camera_type}'
+            raise RuntimeError(f'No camera type {camera_type}')
 
     def raster_rasterize(self, pos, tri, resolution, ranges=None, grad_db=True):
 
@@ -171,8 +200,16 @@ class MeshRender():
             findices, barycentric = self.raster.rasterize(pos, tri, resolution)
             rast_out = torch.cat((barycentric, findices.unsqueeze(-1)), dim=-1)
             rast_out = rast_out.unsqueeze(0)
+        elif self.raster_mode == 'mtl':
+            # mtldiffrast expects Metal depth convention z in [0, w], while the
+            # existing pipeline produces OpenGL-style z in [-w, w]. Remap z.
+            pos_mtl = pos.clone()
+            pos_mtl[..., 2] = pos_mtl[..., 2] * 0.5 + 0.5
+            rast_out, rast_out_db = self.raster.rasterize(
+                self.glctx, pos_mtl, tri, resolution=resolution, grad_db=grad_db
+            )
         else:
-            raise f'No raster named {self.raster_mode}'
+            raise RuntimeError(f'No raster named {self.raster_mode}')
 
         return rast_out, rast_out_db
 
@@ -185,8 +222,12 @@ class MeshRender():
             if uv.dim() == 2:
                 uv = uv.unsqueeze(0)
             textc = self.raster.interpolate(uv, findices, barycentric, uv_idx)
+        elif self.raster_mode == 'mtl':
+            textc, textd = self.raster.interpolate(
+                uv, rast_out, uv_idx, rast_db=rast_db, diff_attrs=diff_attrs
+            )
         else:
-            raise f'No raster named {self.raster_mode}'
+            raise RuntimeError(f'No raster named {self.raster_mode}')
 
         return textc, textd
 
@@ -194,9 +235,15 @@ class MeshRender():
                        boundary_mode='wrap', max_mip_level=None):
 
         if self.raster_mode == 'cr':
-            raise f'Texture is not implemented in cr'
+            raise RuntimeError('Texture is not implemented in cr')
+        elif self.raster_mode == 'mtl':
+            color = self.raster.texture(
+                tex, uv, uv_da=uv_da, mip_level_bias=mip_level_bias, mip=mip,
+                filter_mode=filter_mode, boundary_mode=boundary_mode,
+                max_mip_level=max_mip_level,
+            )
         else:
-            raise f'No raster named {self.raster_mode}'
+            raise RuntimeError(f'No raster named {self.raster_mode}')
 
         return color
 
@@ -205,8 +252,14 @@ class MeshRender():
         if self.raster_mode == 'cr':
             # Antialias has not been supported yet
             color = color
+        elif self.raster_mode == 'mtl':
+            color = self.raster.antialias(
+                color, rast, pos, tri,
+                topology_hash=topology_hash,
+                pos_gradient_boost=pos_gradient_boost,
+            )
         else:
-            raise f'No raster named {self.raster_mode}'
+            raise RuntimeError(f'No raster named {self.raster_mode}')
 
         return color
 
@@ -237,11 +290,16 @@ class MeshRender():
         scale_factor=1.15, auto_center=True
     ):
 
-        self.vtx_pos = torch.from_numpy(vtx_pos).to(self.device).float()
+        self.vtx_pos = torch.from_numpy(vtx_pos).float().to(self.device)
         self.pos_idx = torch.from_numpy(pos_idx).to(self.device).to(torch.int)
+        if self.raster_mode == 'mtl':
+            # mtldiffrast path appears to cull opposite winding vs custom_rasterizer.
+            self.pos_idx = self.pos_idx[:, [0, 2, 1]].contiguous()
         if (vtx_uv is not None) and (uv_idx is not None):
-            self.vtx_uv = torch.from_numpy(vtx_uv).to(self.device).float()
+            self.vtx_uv = torch.from_numpy(vtx_uv).float().to(self.device)
             self.uv_idx = torch.from_numpy(uv_idx).to(self.device).to(torch.int)
+            if self.raster_mode == 'mtl':
+                self.uv_idx = self.uv_idx[:, [0, 2, 1]].contiguous()
         else:
             self.vtx_uv = None
             self.uv_idx = None
@@ -269,8 +327,7 @@ class MeshRender():
 
         tex = tex.resize(self.texture_size).convert('RGB')
         tex = np.array(tex) / 255.0
-        self.tex = torch.from_numpy(tex).to(self.device)
-        self.tex = self.tex.float()
+        self.tex = torch.from_numpy(tex).float().to(self.device)
 
     def set_default_render_resolution(self, default_resolution):
         if isinstance(default_resolution, int):
@@ -397,7 +454,7 @@ class MeshRender():
         r_mvp = np.matmul(proj, r_mv).astype(np.float32)
         if tex is not None:
             if isinstance(tex, Image.Image):
-                tex = torch.tensor(np.array(tex) / 255.0)
+                tex = torch.tensor(np.array(tex) / 255.0, dtype=torch.float32)
             elif isinstance(tex, np.ndarray):
                 tex = torch.tensor(tex)
             if tex.dim() == 2:
@@ -653,7 +710,7 @@ class MeshRender():
     def back_project(self, image, elev, azim,
                      camera_distance=None, center=None, method=None):
         if isinstance(image, Image.Image):
-            image = torch.tensor(np.array(image) / 255.0)
+            image = torch.tensor(np.array(image) / 255.0, dtype=torch.float32)
         elif isinstance(image, np.ndarray):
             image = torch.tensor(image)
         if image.dim() == 2:
