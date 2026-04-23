@@ -1,13 +1,17 @@
-# Hunyuan3D on Apple Silicon (MPS + MLX)
+# Hunyuan3D on Apple Silicon M{PS, LX}
 
-A streamlined Hunyuan3D workspace focused on:
-- Shape generation (SV + MV)
-- Paint/texturing
-- Apple Silicon support with a practical default: use MLX for paint diffusion
+Full reference implementation of Hunyuan3D inference on native Apple Silicon, including MLX texturing. 
+
+**Project/docs are a WIP and all contributions are welcome.** Writup on all the optimizations that was done coming soon (i.e. some work trimming down CPU UV Unwrapping, among other kernel stuff)
+
+
+This is a continuation of a months long attempt to port Hunyuan3D-Paint to MPS, read about my first failed attempt in December [here](https://blog.zimengxiong.com/#post/porting-hunyuan3d-2-texture-generation-to-apple-silicon-mps).
+
+![](feature.png)
 
 ---
 
-## Current status
+## Supported Models
 
 | Model | Type | MPS | MLX | MLX HF |
 | - | - | - | - | - |
@@ -24,9 +28,10 @@ A streamlined Hunyuan3D workspace focused on:
 
 ---
 
-## Note on MPS
-
-PyTorch/MPS paint can use very high unified memory and may OOM/kill on larger runs, so run paint with `--paint-diffusion-backend mlx`
+## Caveats
+- PyTorch/MPS paint can use very high unified memory and may OOM/kill on larger runs, so run paint with `--paint-diffusion-backend mlx`
+- Quality is not as good as CUDA due to the immaturity of the libraries
+- Currently writing the MLX pipeline to get shapes working, after that, 2.1 paint is priority.
 
 ---
 
@@ -193,3 +198,8 @@ uv run python paint/2.0/convert_mlx.py <path-to-hunyuan3d-paint-v2-0>
 # 2.0-turbo
 uv run python paint/2.0/turbo/convert_mlx.py <path-to-hunyuan3d-paint-v2-0-turbo>
 ```
+
+## Credits
+Derivative work of [Tencent](https://github.com/Tencent-Hunyuan/Hunyuan3D-2), [Lane et. al](https://arxiv.org/abs/2011.03277), and pedronaugusto.
+
+MIT Licensed
