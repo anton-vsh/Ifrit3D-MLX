@@ -1,4 +1,5 @@
-# Byte-compiled / optimized / DLL files
+# MLX converted weights
+converted/
 __pycache__/
 *.py[cod]
 *$py.class

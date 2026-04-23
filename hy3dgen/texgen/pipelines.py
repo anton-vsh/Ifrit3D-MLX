@@ -33,11 +33,23 @@ logger = logging.getLogger(__name__)
 
 class Hunyuan3DTexGenConfig:
 
-    def __init__(self, light_remover_ckpt_path, multiview_ckpt_path, subfolder_name):
+    def __init__(
+        self,
+        light_remover_ckpt_path,
+        multiview_ckpt_path,
+        subfolder_name,
+        diffusion_backend='pytorch',
+        mlx_weights_path=None,
+        mlx_profile=None,
+    ):
         # Prefer CUDA, then MPS, then CPU.
         self.device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
         self.light_remover_ckpt_path = light_remover_ckpt_path
         self.multiview_ckpt_path = multiview_ckpt_path
+
+        self.diffusion_backend = diffusion_backend
+        self.mlx_weights_path = mlx_weights_path
+        self.mlx_profile = mlx_profile
 
         self.candidate_camera_azims = [0, 90, 180, 270, 0, 180]
         self.candidate_camera_elevs = [0, 0, 0, 0, 90, -90]
@@ -51,48 +63,91 @@ class Hunyuan3DTexGenConfig:
         self.pipe_dict = {
             'hunyuan3d-paint-v2-0': 'hunyuanpaint',
             'hunyuan3d-paint-v2-0-turbo': 'hunyuanpaint-turbo',
-            'hunyuan3d-paint-v2-1': 'hunyuanpaint',
-            'hunyuan3d-paintpbr-v2-1': 'hunyuanpaint',
-            'hunyuan3d-paint-v2-1-turbo': 'hunyuanpaint-turbo',
+            'hunyuan3d-paint-v2-1': 'hunyuanpaintpbr',
+            'hunyuan3d-paintpbr-v2-1': 'hunyuanpaintpbr',
+            'hunyuan3d-paint-v2-1-turbo': 'hunyuanpaintpbr',
         }
         self.pipe_name = self.pipe_dict.get(subfolder_name, 'hunyuanpaint-turbo' if 'turbo' in subfolder_name else 'hunyuanpaint')
 
 
 class Hunyuan3DPaintPipeline:
     @classmethod
-    def from_pretrained(cls, model_path, subfolder='hunyuan3d-paint-v2-0-turbo'):
+    def from_pretrained(
+        cls,
+        model_path,
+        subfolder='hunyuan3d-paint-v2-0-turbo',
+        diffusion_backend='pytorch',
+        mlx_weights_path=None,
+    ):
+        def _infer_mlx_profile(subfolder_name: str) -> str:
+            if 'paintpbr' in subfolder_name or 'v2-1' in subfolder_name:
+                return 'paint-pbr-2.1'
+            return 'paint-2.0'
+
+        def _default_mlx_weights_path(multiview_model_path: str, profile: str):
+            parent = os.path.dirname(multiview_model_path)
+            if profile == 'paint-2.0':
+                candidates = [
+                    os.path.join(parent, 'hunyuan3d-2.0-mlx'),
+                    os.path.join(multiview_model_path, 'mlx_weights'),
+                ]
+            else:
+                candidates = [
+                    os.path.join(parent, 'hunyuan3d-2.1-mlx'),
+                    os.path.join(multiview_model_path, 'mlx_weights'),
+                ]
+            for c in candidates:
+                if os.path.isdir(c):
+                    return c
+            return candidates[0]
+
         original_model_path = model_path
+        delight_model_path = None
         if not os.path.exists(model_path):
             # try local path
             base_dir = os.environ.get('HY3DGEN_MODELS', '~/.cache/hy3dgen')
             model_path = os.path.expanduser(os.path.join(base_dir, model_path))
 
-            delight_model_path = os.path.join(model_path, 'hunyuan3d-delight-v2-0')
             multiview_model_path = os.path.join(model_path, subfolder)
+            candidate_delight_model_path = os.path.join(model_path, 'hunyuan3d-delight-v2-0')
+            if os.path.exists(candidate_delight_model_path):
+                delight_model_path = candidate_delight_model_path
 
-            if not os.path.exists(delight_model_path) or not os.path.exists(multiview_model_path):
+            if not os.path.exists(multiview_model_path):
                 try:
                     import huggingface_hub
-                    # download from huggingface
-                    model_path = huggingface_hub.snapshot_download(
-                        repo_id=original_model_path, allow_patterns=["hunyuan3d-delight-v2-0/*"]
-                    )
                     model_path = huggingface_hub.snapshot_download(
                         repo_id=original_model_path, allow_patterns=[f'{subfolder}/*']
                     )
-                    delight_model_path = os.path.join(model_path, 'hunyuan3d-delight-v2-0')
                     multiview_model_path = os.path.join(model_path, subfolder)
-                    return cls(Hunyuan3DTexGenConfig(delight_model_path, multiview_model_path, subfolder))
+                    candidate_delight_model_path = os.path.join(model_path, 'hunyuan3d-delight-v2-0')
+                    if os.path.exists(candidate_delight_model_path):
+                        delight_model_path = candidate_delight_model_path
                 except Exception:
                     import traceback
                     traceback.print_exc()
                     raise RuntimeError(f"Something wrong while loading {model_path}")
-            else:
-                return cls(Hunyuan3DTexGenConfig(delight_model_path, multiview_model_path, subfolder))
         else:
-            delight_model_path = os.path.join(model_path, 'hunyuan3d-delight-v2-0')
+            candidate_delight_model_path = os.path.join(model_path, 'hunyuan3d-delight-v2-0')
+            if os.path.exists(candidate_delight_model_path):
+                delight_model_path = candidate_delight_model_path
             multiview_model_path = os.path.join(model_path, subfolder)
-            return cls(Hunyuan3DTexGenConfig(delight_model_path, multiview_model_path, subfolder))
+
+        mlx_profile = _infer_mlx_profile(subfolder)
+        resolved_mlx_weights_path = mlx_weights_path
+        if diffusion_backend == 'mlx' and resolved_mlx_weights_path is None:
+            resolved_mlx_weights_path = _default_mlx_weights_path(multiview_model_path, mlx_profile)
+
+        return cls(
+            Hunyuan3DTexGenConfig(
+                delight_model_path,
+                multiview_model_path,
+                subfolder,
+                diffusion_backend=diffusion_backend,
+                mlx_weights_path=resolved_mlx_weights_path,
+                mlx_profile=mlx_profile,
+            )
+        )
             
     def __init__(self, config):
         self.config = config
@@ -110,12 +165,15 @@ class Hunyuan3DPaintPipeline:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         # Load model
-        self.models['delight_model'] = Light_Shadow_Remover(self.config)
+        self.models['delight_model'] = None
+        if self.config.light_remover_ckpt_path and os.path.exists(self.config.light_remover_ckpt_path):
+            self.models['delight_model'] = Light_Shadow_Remover(self.config)
         self.models['multiview_model'] = Multiview_Diffusion_Net(self.config)
         # self.models['super_model'] = Image_Super_Net(self.config)
 
     def enable_model_cpu_offload(self, gpu_id: Optional[int] = None, device: Union[torch.device, str] = "cuda"):
-        self.models['delight_model'].pipeline.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
+        if self.models['delight_model'] is not None:
+            self.models['delight_model'].pipeline.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
         self.models['multiview_model'].pipeline.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
 
     def render_normal_multiview(self, camera_elevs, camera_azims, use_abs_coor=True):
@@ -214,8 +272,12 @@ class Hunyuan3DPaintPipeline:
         images_prompt = [self.recenter_image(image_prompt) for image_prompt in images_prompt]
 
         # On MPS, the delight preprocessor can produce unstable outputs (noise).
-        # Skip it unless explicitly enabled.
-        use_delight = os.environ.get('HY3D_USE_DELIGHT', '0') == '1' and self.config.device != 'mps'
+        # Skip it unless explicitly enabled and available.
+        use_delight = (
+            os.environ.get('HY3D_USE_DELIGHT', '0') == '1'
+            and self.config.device != 'mps'
+            and self.models['delight_model'] is not None
+        )
         if use_delight:
             images_prompt = [self.models['delight_model'](image_prompt) for image_prompt in images_prompt]
 

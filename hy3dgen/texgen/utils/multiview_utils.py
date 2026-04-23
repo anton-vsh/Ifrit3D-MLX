@@ -14,12 +14,13 @@
 
 import os
 import random
+import shutil
 
 import numpy as np
 import torch
 from typing import List
 from diffusers import DiffusionPipeline
-from diffusers import EulerAncestralDiscreteScheduler, LCMScheduler
+from diffusers import DDIMScheduler, EulerAncestralDiscreteScheduler, LCMScheduler
 
 
 class Multiview_Diffusion_Net():
@@ -29,23 +30,92 @@ class Multiview_Diffusion_Net():
         multiview_ckpt_path = config.multiview_ckpt_path
 
         current_file_path = os.path.abspath(__file__)
-        custom_pipeline_path = os.path.join(os.path.dirname(current_file_path), '..', 'hunyuanpaint')
+        pipeline_dir_name = 'hunyuanpaintpbr' if config.pipe_name == 'hunyuanpaintpbr' else 'hunyuanpaint'
+        custom_pipeline_path = os.path.join(os.path.dirname(current_file_path), '..', pipeline_dir_name)
+        self.is_pbr = config.pipe_name == 'hunyuanpaintpbr'
+
+        if self.is_pbr:
+            local_unet_dir = os.path.join(os.path.dirname(current_file_path), '..', 'hunyuanpaintpbr', 'unet')
+            model_unet_dir = os.path.join(multiview_ckpt_path, 'unet')
+            for module_file in ['attn_processor.py', 'modules.py']:
+                local_file = os.path.join(local_unet_dir, module_file)
+                model_file = os.path.join(model_unet_dir, module_file)
+                if os.path.exists(local_file) and os.path.exists(model_unet_dir):
+                    shutil.copy2(local_file, model_file)
 
         pipeline = DiffusionPipeline.from_pretrained(
             multiview_ckpt_path,
-            custom_pipeline=custom_pipeline_path, torch_dtype=torch.float16)
+            custom_pipeline=custom_pipeline_path,
+            torch_dtype=torch.float16,
+        )
 
-        if config.pipe_name in ['hunyuanpaint']:
-            pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(pipeline.scheduler.config,
-                                                                             timestep_spacing='trailing')
-        elif config.pipe_name in ['hunyuanpaint-turbo']:
-            pipeline.scheduler = LCMScheduler.from_config(pipeline.scheduler.config,
-                                                        timestep_spacing='trailing')
+        if config.pipe_name == 'hunyuanpaint':
+            pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
+                pipeline.scheduler.config,
+                timestep_spacing='trailing',
+            )
+        elif config.pipe_name == 'hunyuanpaint-turbo':
+            pipeline.scheduler = LCMScheduler.from_config(
+                pipeline.scheduler.config,
+                timestep_spacing='trailing',
+            )
             pipeline.set_turbo(True)
-            # pipeline.prepare() 
+        elif config.pipe_name == 'hunyuanpaintpbr':
+            pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
 
         pipeline.set_progress_bar_config(disable=True)
-        self.pipeline = pipeline.to(self.device)
+
+        # Fix for Tencent's 2.1 PBR pipeline bug (expects 'gen' but model has 'albedo')
+        if hasattr(pipeline, "unet"):
+            inner_unet = getattr(pipeline.unet, "unet", pipeline.unet)
+            if not hasattr(inner_unet, "learned_text_clip_gen"):
+                if hasattr(inner_unet, "learned_text_clip_albedo"):
+                    inner_unet.learned_text_clip_gen = inner_unet.learned_text_clip_albedo
+                elif hasattr(inner_unet, "learned_text_clip_ref"):
+                    inner_unet.learned_text_clip_gen = inner_unet.learned_text_clip_ref
+
+        backend = getattr(config, 'diffusion_backend', 'pytorch')
+        if backend == 'mlx' and self.is_pbr:
+            # Keep the heavy PyTorch pipeline on CPU for 2.1 MLX mode.
+            # MLX handles the UNet compute; keeping PyTorch weights off MPS avoids unified-memory kills.
+            self.pipeline = pipeline
+        else:
+            self.pipeline = pipeline.to(self.device)
+
+        self.dino_v2 = None
+        if self.is_pbr and hasattr(self.pipeline.unet, "use_dino") and self.pipeline.unet.use_dino:
+            try:
+                from ..hunyuanpaintpbr.unet.modules import Dino_v2
+                dino_ckpt_path = os.path.join(multiview_ckpt_path, "mvd_std")
+                if os.path.exists(dino_ckpt_path):
+                    self.dino_v2 = Dino_v2(dino_ckpt_path).to(torch.float16)
+                    self.dino_v2 = self.dino_v2.to(self.device)
+            except Exception as e:
+                print(f"[WARN] Failed to load Dino_v2 for 2.1 PBR pipeline: {e}")
+
+        # Optional MLX backend: keep diffusers pipeline, replace UNet forward with MLX.
+        if backend == 'mlx':
+            if torch.device(self.device).type != 'mps':
+                raise RuntimeError(
+                    f"[MLX] backend=mlx requires MPS device, got: {self.device}"
+                )
+            try:
+                from ..mlx.hybrid_unet import HybridMLXUNet
+
+                self._mlx_hybrid = HybridMLXUNet.patch_pipeline(
+                    self.pipeline,
+                    model_path=multiview_ckpt_path,
+                    weights_path=getattr(config, 'mlx_weights_path', None),
+                    profile=getattr(config, 'mlx_profile', None),
+                )
+
+                # Free MPS memory: MLX owns the UNet weights now.
+                if self.is_pbr:
+                    self.pipeline.unet.to('cpu')
+                    if torch.backends.mps.is_available():
+                        torch.mps.empty_cache()
+            except Exception as e:
+                raise RuntimeError(f"[MLX] Failed to enable MLX backend: {e}") from e
 
     def seed_everything(self, seed):
         random.seed(seed)
@@ -72,11 +142,33 @@ class Multiview_Diffusion_Net():
         normal_image = [[control_images[i] for i in range(num_view)]]
         position_image = [[control_images[i + num_view] for i in range(num_view)]]
 
-        camera_info_gen = [camera_info]
-        camera_info_ref = [[0]]
         kwargs['width'] = self.view_size
         kwargs['height'] = self.view_size
         kwargs['num_in_batch'] = num_view
+
+        if self.is_pbr:
+            kwargs["images_normal"] = normal_image
+            kwargs["images_position"] = position_image
+            if self.dino_v2 is not None:
+                kwargs["dino_hidden_states"] = self.dino_v2(input_images[0])
+            else:
+                kwargs["dino_hidden_states"] = torch.zeros(
+                    (1, 1, 1536),
+                    dtype=getattr(self.pipeline.unet, "dtype", torch.float16),
+                    device=self.device,
+                )
+            mvd_image = self.pipeline(
+                input_images[0:1],
+                num_inference_steps=30,
+                guidance_scale=3.0,
+                **kwargs,
+            ).images
+
+            # Current Hunyuan3D-2 texture baker expects a list of albedo multiview images.
+            return mvd_image[:num_view]
+
+        camera_info_gen = [camera_info]
+        camera_info_ref = [[0]]
         kwargs['camera_info_gen'] = camera_info_gen
         kwargs['camera_info_ref'] = camera_info_ref
         kwargs["normal_imgs"] = normal_image

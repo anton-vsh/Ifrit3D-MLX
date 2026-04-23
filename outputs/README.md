@@ -1,31 +1,14 @@
 # Outputs
 
-Generated files are grouped by purpose.
+The new CLI (`main.py`) writes to these locations by default:
 
-## `demo/`
+- demo single-view runs -> `outputs/sv/<index-or-penguin>/`
+- demo multiview runs -> `outputs/mv/<index>/`
+- manual custom input runs -> `outputs/custom/<lowest-unused-integer>/`
 
-Canonical demo artifacts used by the MPS scripts.
+This repository also keeps older benchmark/debug artifacts that were already generated before the unified CLI refactor:
 
-## `custom/`
-
-One-off custom runs, usually created by `examples/mps/custom_shape_paint_mps.py`.
-
-## `benchmark/`
-
-Performance-test outputs, optimized variants, UV backend experiments, and profiling meshes.
-
-## `compare/`
-
-Comparison images between baseline, safe optimized, and faster experimental runs.
-
-## `debug/extracted/`
-
-Textures extracted from GLBs.
-
-## `debug/rendered_views/`
-
-Rendered inspection views of textured meshes.
-
-## `debug/stages/`
-
-Intermediate paint-stage dumps such as prompt, normal, position, multiview, and baked texture images.
+- `outputs/benchmark/`
+- `outputs/compare/`
+- `outputs/debug/`
+- `outputs/demo/`
