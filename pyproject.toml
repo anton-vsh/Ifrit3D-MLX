@@ -1,7 +1,7 @@
 [project]
-name = "hunyuan3d-2-local"
+name = "hunyuan3d-mlx"
 version = "0.1.0"
-description = "Stripped-down local Hunyuan3D-2 workspace focused on image-to-shape and mesh painting"
+description = "Run Hunyuan3D on Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 dependencies = [

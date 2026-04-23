@@ -393,7 +393,7 @@ wheels = [
 ]
 
 [[package]]
-name = "hunyuan3d-2-local"
+name = "hunyuan3d-mlx-local"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

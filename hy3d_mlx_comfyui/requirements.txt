@@ -1,0 +1,24 @@
+accelerate
+diffusers
+einops
+numpy
+omegaconf
+onnxruntime
+opencv-python
+pillow
+pybind11
+pygltflib
+pymeshlab
+rembg
+torch
+torchvision
+tqdm>=4.66.3
+transformers>=4.48.0
+trimesh
+xatlas
+ninja
+mlx; platform_system == "Darwin" and platform_machine == "arm64"
+mtldiffrast
+mtlbvh
+cumesh
+flex-gemm

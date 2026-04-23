@@ -11,6 +11,16 @@ This is a continuation of a months long attempt to port Hunyuan3D-Paint to MPS, 
 
 ---
 
+## ComfyUI
+
+There is also a standalone ComfyUI custom node package in [hy3d_mlx_comfyui](hy3d_mlx_comfyui/).
+
+It includes separate shape and paint nodes, with paint limited to `hunyuan3d-paint-v2-0` and `hunyuan3d-paint-v2-0-turbo`.
+
+Install and usage notes: [hy3d_mlx_comfyui/README.md](hy3d_mlx_comfyui/README.md)
+
+---
+
 ## Supported Models
 
 | Model | Type | MPS | MLX | MLX HF |
@@ -46,7 +56,7 @@ This is a continuation of a months long attempt to port Hunyuan3D-Paint to MPS, 
 
 ### 2) Install
 ```bash
-cd Hunyuan3D-2
+cd Hunyuan3D-MLX
 uv sync
 ```
 
