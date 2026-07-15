@@ -1,23 +1,24 @@
-# Ifrit3D-MLX
+# Ifrit3D-MLX (mac Os only)
+
+Spiritual successor to Luma Genie (RIP). Now you can generate whose «ugly» (but incredibly cozy) 3D models once again (upscale option included). As a cherry on the cake, you can also generate robust lowpoly models and «normal» high poly aswell.
+
+Huge thank you to the authors of the original models and MLX port.
 
 Full reference implementation of Hunyuan3D inference on native Apple Silicon, including MLX texturing, plus a full Gradio UI and a standalone macOS app.
 
 Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
-**Project/docs are a WIP and all contributions are welcome.** Writeup on all the optimizations that was done coming soon (i.e. some work trimming down CPU UV Unwrapping, among other kernel stuff). This is a continuation of a months long attempt to port Hunyuan3D-Paint to MPS since last December.
-
-
-![](feature.png)
-
 ---
 
-## What's new in Ifrit3D-MLX
+## What's new in Ifrit3D-MLX compared to originam Hunyuan3d-MLX
 
 This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX) (CLI-only) and has grown into a full application on top of it:
 
 - **Gradio UI** (`app.py`) — Image-to-3D and Text-to-3D tabs, covering shape generation, texturing, polygon reduction, and upscaling without touching a terminal.
 - **Standalone macOS app** — the same UI packaged as a double-clickable `.app`/`.dmg` with a menu bar helper (no Terminal window, no Dock icon), model weights downloaded on first use into `~/Library/Application Support/`. See [Releases](../../releases) for a prebuilt build, or `scripts/build_app.sh` to build your own.
 - **Pipeline caching** — shape and paint pipelines stay loaded across generations instead of reloading from disk every run.
+- **Polygon reduction** — main feature. Inserts remesh step inside of the main pipeline resulting in cleaner mesh and correct lowpoly UV.
+- **Text to 3D** — image generation as the starting step. Instrumental in getting that Luma Genie look.
 - **FlashVDM volume decoder** — an optional faster decode path, with fragment filtering to clean up the mesh artifacts it can introduce.
 - **Multi-view shape input** — reconstruct from front + left + back images instead of a single photo, for shape models that support it.
 - **Re-texture with seed** — re-run just the texturing pass on an existing mesh with a new (or fixed) seed, without regenerating the shape.
@@ -26,17 +27,7 @@ This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/Zimeng
 
 ---
 
-## ComfyUI
-
-There is also a standalone ComfyUI custom node package in [hy3d_mlx_comfyui](hy3d_mlx_comfyui/).
-
-It includes separate shape and paint nodes, with paint limited to `hunyuan3d-paint-v2-0` and `hunyuan3d-paint-v2-0-turbo`.
-
-Install and usage notes: [hy3d_mlx_comfyui/README.md](hy3d_mlx_comfyui/README.md)
-
----
-
-## Supported Models
+## Supported Models (same as original Hunyuan3D-MLX)
 
 | Model | Type | MPS | MLX | MLX HF |
 | - | - | - | - | - |
@@ -53,179 +44,12 @@ Install and usage notes: [hy3d_mlx_comfyui/README.md](hy3d_mlx_comfyui/README.md
 
 ---
 
-## Caveats
-- PyTorch/MPS paint can use very high unified memory and may OOM/kill on larger runs, so run paint with `--paint-diffusion-backend mlx`
-- Quality is not as good as CUDA due to the immaturity of the libraries
-- Currently writing the MLX pipeline to get shapes working, after that, 2.1 paint is priority.
-
----
-
 ## Setup / install
 
-### 1) Prerequisites
-- macOS on Apple Silicon
-- Python 3.14
-- [uv](https://docs.astral.sh/uv/)
-- Xcode Command Line Tools (`xcrun` available)
-- Hugging Face CLI auth (`hf auth login`)
-
-### 2) Install
-```bash
-cd Ifrit3D-MLX
-uv sync
-```
-
-### 3) Smoke check
-```bash
-uv run python main.py --help
-uv run python main.py shape --help
-uv run python main.py paint --help
-```
-
----
-
-## Benchmarks
-M4 Max 40c
-
-| Task | Time |
-| - |  - |
-| Paint 2.0 (MLX) |  114.3s |
-| Paint 2.0-turbo (MLX) |  62.6s |
-| Paint 2.0 (MPS) | 302.4s |
-| Paint 2.0-turbo (MPS) | 222.1s |
-| Shape mini (MPS) | 253.1 |
-| Shape mini-turbo (MPS) | 86.8s |
-
-Notes:
-- Turbo and non-turbo are different checkpoints, so outputs are not pixel-identical.
-- MLX backend currently accelerates diffusion UNet path; renderer and some stages still use PyTorch components.
-- MLX generally outperforms MPS, use MLX when possible
----
-
-## Run with `main.py`
-
-<details>
-<summary><strong>Shape</strong></summary>
-
-```bash
-# default demo (penguin)
-uv run python main.py shape
-
-# explicit presets
-uv run python main.py shape --shape-preset mini
-uv run python main.py shape --shape-preset mini-turbo
-uv run python main.py shape --shape-preset 2.0
-uv run python main.py shape --shape-preset 2.0-turbo
-uv run python main.py shape --shape-preset 2.1 --no-shape-safetensors
-
-# multiview from images/mv/1
-uv run python main.py shape --shape-preset mv mv 1
-uv run python main.py shape --shape-preset mv-turbo mv 1
-```
-</details>
-
-<details>
-<summary><strong>Paint (recommended MLX)</strong></summary>
-
-```bash
-# 2.0 MLX (auto-pulls MLX weights from HF if not local)
-uv run python main.py paint \
-  --paint-preset 2.0 \
-  --paint-diffusion-backend mlx \
-  --mesh outputs/demo/demo_shape_mps.glb
-
-# 2.0-turbo MLX (auto-pulls MLX weights from HF if not local)
-uv run python main.py paint \
-  --paint-preset 2.0-turbo \
-  --paint-diffusion-backend mlx \
-  --mesh outputs/demo/demo_shape_mps.glb
-
-# optional explicit local override
-uv run python main.py paint \
-  --paint-preset 2.0-turbo \
-  --paint-diffusion-backend mlx \
-  --paint-mlx-weights converted/Hunyuan3D-2.0-Paint-MLX/2.0-turbo \
-  --mesh outputs/demo/demo_shape_mps.glb
-```
-</details>
-
-<details>
-<summary><strong>Paint (PyTorch/MPS)</strong></summary>
-
-```bash
-uv run python main.py paint --paint-preset 2.0 --mesh outputs/demo/demo_shape_mps.glb
-uv run python main.py paint --paint-preset 2.0-turbo --mesh outputs/demo/demo_shape_mps.glb
-uv run python main.py paint --paint-preset 2.1 --mesh outputs/demo/demo_shape_mps.glb
-```
-</details>
-
-<details>
-<summary><strong>Full pipeline</strong></summary>
-
-```bash
-uv run python main.py full
-uv run python main.py full mv 1
-
-# full with MLX paint backend
-uv run python main.py full \
-  --shape-preset 2.0-turbo \
-  --paint-preset 2.0-turbo \
-  --paint-diffusion-backend mlx
-```
-</details>
-
----
-
-## Per-model script runners
-
-<details>
-<summary><strong>Shape scripts</strong></summary>
-
-```bash
-uv run python shape/mini/gen.py
-uv run python shape/mini/turbo/gen.py
-uv run python shape/2.0/gen.py
-uv run python shape/2.0/turbo/gen.py
-uv run python shape/2.1/gen.py --no-shape-safetensors
-uv run python shape/mv/gen.py mv 1
-uv run python shape/mv/turbo/gen.py mv 1
-```
-</details>
-
-<details>
-<summary><strong>Paint scripts (MLX)</strong></summary>
-
-```bash
-uv run python paint/2.0/gen_mlx.py --mesh outputs/demo/demo_shape_mps.glb
-uv run python paint/2.0/turbo/gen_mlx.py --mesh outputs/demo/demo_shape_mps.glb
-uv run python paint/2.1/gen_mlx.py --mesh outputs/demo/demo_shape_mps.glb
-```
-</details>
-
-<details>
-<summary><strong>Paint scripts (PyTorch)</strong></summary>
-
-```bash
-uv run python paint/2.0/gen.py --mesh outputs/demo/demo_shape_mps.glb
-uv run python paint/2.0/turbo/gen.py --mesh outputs/demo/demo_shape_mps.glb
-uv run python paint/2.1/gen.py --mesh outputs/demo/demo_shape_mps.glb
-```
-</details>
-
----
-
-## Optional: convert MLX weights yourself
-
-```bash
-# 2.0
-uv run python paint/2.0/convert_mlx.py <path-to-hunyuan3d-paint-v2-0>
-
-# 2.0-turbo
-uv run python paint/2.0/turbo/convert_mlx.py <path-to-hunyuan3d-paint-v2-0-turbo>
-```
+Use «Releases» section to download .dmg and install as a regular .app
 
 ## Credits
-Ifrit3D-MLX is maintained by [Anton Shlyonkin](https://www.shlyonk.in), built on top of [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX), which is itself a derivative work of [Tencent](https://github.com/Tencent-Hunyuan/Hunyuan3D-2), [Lane et. al](https://arxiv.org/abs/2011.03277), and pedronaugusto.
+Built on top of [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX), which is itself a derivative work of [Tencent](https://github.com/Tencent-Hunyuan/Hunyuan3D-2), [Lane et. al](https://arxiv.org/abs/2011.03277), and pedronaugusto.
 
 Model and derivative models respect the `TENCENT HUNYUAN 3D 2.0 COMMUNITY LICENSE AGREEMENT`, see [legal](legal/hunyuan/)
 
