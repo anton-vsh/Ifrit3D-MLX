@@ -12,7 +12,9 @@
 # fine-tuning enabling code and other elements of the foregoing made publicly available
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
+import numpy as np
 import trimesh
+from PIL import Image
 
 
 def load_mesh(mesh):
@@ -28,7 +30,20 @@ def load_mesh(mesh):
 
 
 def save_mesh(mesh, texture_data):
-    material = trimesh.visual.texture.SimpleMaterial(image=texture_data, diffuse=(255, 255, 255))
-    texture_visuals = trimesh.visual.TextureVisuals(uv=mesh.visual.uv, image=texture_data, material=material)
+    tex = texture_data
+    if isinstance(tex, np.ndarray):
+        tex = Image.fromarray((tex * 255).astype(np.uint8)) if tex.dtype in [np.float32, np.float64] else Image.fromarray(tex)
+    elif not isinstance(tex, Image.Image) and hasattr(tex, '__array__'):
+        arr = np.asarray(tex)
+        tex = Image.fromarray((arr * 255).astype(np.uint8)) if arr.dtype in [np.float32, np.float64] else Image.fromarray(arr)
+
+    material = trimesh.visual.material.PBRMaterial(
+        baseColorTexture=tex,
+        baseColorFactor=[1.0, 1.0, 1.0, 1.0],
+        metallicFactor=0.0,
+        roughnessFactor=1.0,
+    )
+    texture_visuals = trimesh.visual.TextureVisuals(uv=mesh.visual.uv, image=tex, material=material)
     mesh.visual = texture_visuals
+
     return mesh

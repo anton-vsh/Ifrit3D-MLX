@@ -1,12 +1,22 @@
+# Claude Code dev-tooling config (local dev-server launch settings, not
+# meaningful to publish)
+.claude/
+
 # MLX converted weights
 converted/
 __pycache__/
 *.py[cod]
 *$py.class
-outputs/validation/ 
+outputs/validation/
 outputs/debug/
 outputs/custom/
 outputs/benchmark/
+# Timestamped run outputs and loose scratch files (keep outputs/compare, outputs/demo)
+outputs/20*/
+outputs/sv/
+outputs/_input.png
+# Local model weights
+models/
 # C extensions
 *.so
 

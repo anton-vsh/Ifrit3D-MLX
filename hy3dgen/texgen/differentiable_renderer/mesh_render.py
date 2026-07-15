@@ -149,6 +149,11 @@ class MeshRender():
             (2 / 512) * max(self.default_resolution[0], self.default_resolution[1]))
         self.bake_mode = bake_mode
 
+        # Cache for world-space vertex normals (render_normal use_abs_coor=True);
+        # these don't depend on elev/azim, so they're identical across every
+        # camera view and only need recomputing when the mesh changes.
+        self._abs_vertex_normals = None
+
         self.raster_mode = raster_mode
         self.raster = None
         self.glctx = None
@@ -292,6 +297,7 @@ class MeshRender():
 
         self.vtx_pos = torch.from_numpy(vtx_pos).float().to(self.device)
         self.pos_idx = torch.from_numpy(pos_idx).to(self.device).to(torch.int)
+        self._abs_vertex_normals = None
         if self.raster_mode == 'mtl':
             # mtldiffrast path appears to cull opposite winding vs custom_rasterizer.
             self.pos_idx = self.pos_idx[:, [0, 2, 1]].contiguous()
@@ -498,30 +504,38 @@ class MeshRender():
         rast_out, rast_out_db = self.raster_rasterize(
             pos_clip, self.pos_idx, resolution=resolution)
 
-        if use_abs_coor:
-            mesh_triangles = self.vtx_pos[self.pos_idx[:, :3], :]
+        if use_abs_coor and self._abs_vertex_normals is not None:
+            vertex_normals = self._abs_vertex_normals
         else:
-            pos_camera = pos_camera[:, :3] / pos_camera[:, 3:4]
-            mesh_triangles = pos_camera[self.pos_idx[:, :3], :]
-        face_normals = F.normalize(
-            torch.cross(mesh_triangles[:,
-                        1,
-                        :] - mesh_triangles[:,
-                             0,
-                             :],
-                        mesh_triangles[:,
-                        2,
-                        :] - mesh_triangles[:,
-                             0,
-                             :],
-                        dim=-1),
-            dim=-1)
+            if use_abs_coor:
+                mesh_triangles = self.vtx_pos[self.pos_idx[:, :3], :]
+            else:
+                pos_camera = pos_camera[:, :3] / pos_camera[:, 3:4]
+                mesh_triangles = pos_camera[self.pos_idx[:, :3], :]
+            face_normals = F.normalize(
+                torch.cross(mesh_triangles[:,
+                            1,
+                            :] - mesh_triangles[:,
+                                 0,
+                                 :],
+                            mesh_triangles[:,
+                            2,
+                            :] - mesh_triangles[:,
+                                 0,
+                                 :],
+                            dim=-1),
+                dim=-1)
 
-        vertex_normals = trimesh.geometry.mean_vertex_normals(vertex_count=self.vtx_pos.shape[0],
-                                                              faces=self.pos_idx.cpu(),
-                                                              face_normals=face_normals.cpu(), )
-        vertex_normals = torch.from_numpy(
-            vertex_normals).float().to(self.device).contiguous()
+            vertex_normals = trimesh.geometry.mean_vertex_normals(vertex_count=self.vtx_pos.shape[0],
+                                                                  faces=self.pos_idx.cpu(),
+                                                                  face_normals=face_normals.cpu(), )
+            vertex_normals = torch.from_numpy(
+                vertex_normals).float().to(self.device).contiguous()
+            if use_abs_coor:
+                # World-space normals are independent of elev/azim, so cache
+                # them — render_normal_multiview calls this once per camera
+                # view with an identical result every time.
+                self._abs_vertex_normals = vertex_normals
 
         # Interpolate normal values across the rasterized pixels
         normal, _ = self.raster_interpolate(
@@ -843,9 +857,16 @@ class MeshRender():
             self.texture_size + (channel,)).to(self.device)
         trust_map_merge = torch.zeros(self.texture_size + (1,)).to(self.device)
         for texture, cos_map in zip(textures, cos_maps):
-            view_sum = (cos_map > 0).sum()
-            painted_sum = ((cos_map > 0) * (trust_map_merge > 0)).sum()
-            if painted_sum / view_sum > 0.99:
+            view_mask = cos_map > 0
+            view_sum = view_mask.sum()
+            if view_sum == 0:
+                continue
+            # Skip a view only if it adds zero previously-unpainted texels.
+            # A ">0.99 mostly redundant" threshold also discarded views whose
+            # marginal <1% coverage was the only source for some isolated UV
+            # texels, leaving those permanently black (visible as flecks).
+            new_sum = (view_mask & (trust_map_merge == 0)).sum()
+            if new_sum == 0:
                 continue
             texture_merge += texture * cos_map
             trust_map_merge += cos_map
@@ -867,13 +888,17 @@ class MeshRender():
         texture_np, mask = meshVerticeInpaint(
             texture_np, mask, vtx_pos, vtx_uv, pos_idx, uv_idx)
 
+        # Scale the inpaint radius with texture resolution: a fixed 3px radius
+        # is too small to bridge unpainted UV gaps at large texture sizes,
+        # leaving unfilled (black) texels behind.
+        inpaint_radius = max(3, max(self.texture_size) // 256)
         texture_np = cv2.inpaint(
             (texture_np *
              255).astype(
                 np.uint8),
             255 -
             mask,
-            3,
+            inpaint_radius,
             cv2.INPAINT_NS)
 
         return texture_np

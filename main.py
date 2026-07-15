@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -138,20 +139,53 @@ def choose_paint_model(args) -> Tuple[str, str]:
     return PAINT_PRESETS["2.0-turbo"]
 
 
-def run_paint_pipeline(mesh, image_paths: List[Path], args):
+# Single-slot cache: process-lifetime reuse of the loaded paint pipeline across
+# calls with the same (model_repo, subfolder, diffusion_backend, mlx_weights_path).
+# A fresh process (CLI usage) gets an empty cache and behaves exactly as before.
+_PAINT_CACHE_KEY = None
+_PAINT_CACHE_PIPELINE = None
+_PAINT_CACHE_LOCK = threading.Lock()
+
+
+def get_or_load_paint_pipeline(model_repo, subfolder, diffusion_backend, mlx_weights_path):
     from hy3dgen.texgen import Hunyuan3DPaintPipeline
 
+    global _PAINT_CACHE_KEY, _PAINT_CACHE_PIPELINE
+
+    key = (model_repo, subfolder, diffusion_backend, mlx_weights_path)
+    with _PAINT_CACHE_LOCK:
+        if _PAINT_CACHE_KEY != key:
+            if _PAINT_CACHE_PIPELINE is not None:
+                import gc
+                import torch
+                # Hunyuan3DPaintPipeline has no unified .to() to move it to CPU;
+                # dropping the reference is what already happened implicitly
+                # between calls before this cache existed, not a regression.
+                _PAINT_CACHE_PIPELINE = None
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                gc.collect()
+
+            _PAINT_CACHE_PIPELINE = Hunyuan3DPaintPipeline.from_pretrained(
+                model_repo,
+                subfolder=subfolder,
+                diffusion_backend=diffusion_backend,
+                mlx_weights_path=mlx_weights_path,
+            )
+            _PAINT_CACHE_KEY = key
+
+        return _PAINT_CACHE_PIPELINE
+
+
+def run_paint_pipeline(mesh, image_paths: List[Path], args, progress_callback=None):
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
     model_repo, subfolder = choose_paint_model(args)
     images = load_pil_images(image_paths, use_rembg=not args.no_rembg)
     image_input = images if len(images) > 1 else images[0]
 
-    painter = Hunyuan3DPaintPipeline.from_pretrained(
-        model_repo,
-        subfolder=subfolder,
-        diffusion_backend=args.paint_diffusion_backend,
-        mlx_weights_path=args.paint_mlx_weights,
+    painter = get_or_load_paint_pipeline(
+        model_repo, subfolder, args.paint_diffusion_backend, args.paint_mlx_weights,
     )
     painter.config.render_size = args.paint_render_size
     painter.config.texture_size = args.paint_texture_size
@@ -159,7 +193,7 @@ def run_paint_pipeline(mesh, image_paths: List[Path], args):
     painter.render.set_default_texture_resolution(args.paint_texture_size)
 
     t0 = time.time()
-    textured = painter(mesh, image=image_input)
+    textured = painter(mesh, image=image_input, seed=getattr(args, 'seed', 0), progress_callback=progress_callback)
     print(f"paint_model={model_repo}/{subfolder}")
     print(f"paint_backend={painter.config.device}/{painter.render.raster_mode}")
     print(f"paint_diffusion_backend={args.paint_diffusion_backend}")

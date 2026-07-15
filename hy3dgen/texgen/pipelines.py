@@ -31,6 +31,16 @@ from .utils.uv_warp_utils import mesh_uv_wrap
 logger = logging.getLogger(__name__)
 
 
+def _scaled_progress(progress_callback, lo, hi):
+    if progress_callback is None:
+        return None
+
+    def _cb(fraction, desc=None):
+        progress_callback(lo + fraction * (hi - lo), desc)
+
+    return _cb
+
+
 class Hunyuan3DTexGenConfig:
 
     def __init__(
@@ -55,8 +65,8 @@ class Hunyuan3DTexGenConfig:
         self.candidate_camera_elevs = [0, 0, 0, 0, 90, -90]
         self.candidate_view_weights = [1, 0.1, 0.5, 0.1, 0.05, 0.05]
 
-        self.render_size = 2048
-        self.texture_size = 2048
+        self.render_size = 1024
+        self.texture_size = 1024
         self.bake_exp = 4
         self.merge_method = 'fast'
 
@@ -193,38 +203,47 @@ class Hunyuan3DPaintPipeline:
         # Empty CUDA cache only when CUDA is active.
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        # Load model
+        # The delight model is a full InstructPix2Pix SD pipeline (multi-GB) and
+        # is disabled by default (HY3D_USE_DELIGHT=0), so defer constructing it
+        # until it's actually needed instead of loading it on every startup.
         self.models['delight_model'] = None
-        if self.config.light_remover_ckpt_path and os.path.exists(self.config.light_remover_ckpt_path):
-            self.models['delight_model'] = Light_Shadow_Remover(self.config)
+        self._delight_available = bool(
+            self.config.light_remover_ckpt_path
+            and os.path.exists(self.config.light_remover_ckpt_path)
+        )
         self.models['multiview_model'] = Multiview_Diffusion_Net(self.config)
         # self.models['super_model'] = Image_Super_Net(self.config)
+
+    def _get_delight_model(self):
+        if self.models['delight_model'] is None and self._delight_available:
+            self.models['delight_model'] = Light_Shadow_Remover(self.config)
+        return self.models['delight_model']
 
     def enable_model_cpu_offload(self, gpu_id: Optional[int] = None, device: Union[torch.device, str] = "cuda"):
         if self.models['delight_model'] is not None:
             self.models['delight_model'].pipeline.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
         self.models['multiview_model'].pipeline.enable_model_cpu_offload(gpu_id=gpu_id, device=device)
 
-    def render_normal_multiview(self, camera_elevs, camera_azims, use_abs_coor=True):
+    def render_normal_multiview(self, camera_elevs, camera_azims, use_abs_coor=True, resolution=None):
         normal_maps = []
         for elev, azim in zip(camera_elevs, camera_azims):
             normal_map = self.render.render_normal(
-                elev, azim, use_abs_coor=use_abs_coor, return_type='pl')
+                elev, azim, use_abs_coor=use_abs_coor, resolution=resolution, return_type='pl')
             normal_maps.append(normal_map)
 
         return normal_maps
 
-    def render_position_multiview(self, camera_elevs, camera_azims):
+    def render_position_multiview(self, camera_elevs, camera_azims, resolution=None):
         position_maps = []
         for elev, azim in zip(camera_elevs, camera_azims):
             position_map = self.render.render_position(
-                elev, azim, return_type='pl')
+                elev, azim, resolution=resolution, return_type='pl')
             position_maps.append(position_map)
 
         return position_maps
 
     def bake_from_multiview(self, views, camera_elevs,
-                            camera_azims, view_weights, method='graphcut'):
+                            camera_azims, view_weights, method='fast'):
         project_textures, project_weighted_cos_maps = [], []
         project_boundary_maps = []
         for view, camera_elev, camera_azim, weight in zip(
@@ -285,7 +304,10 @@ class Hunyuan3DPaintPipeline:
         return new_image
 
     @torch.no_grad()
-    def __call__(self, mesh, image):
+    def __call__(self, mesh, image, seed=0, progress_callback=None):
+
+        if progress_callback is not None:
+            progress_callback(0.0, "Preparing reference images...")
 
         if not isinstance(image, List):
             image = [image]
@@ -297,20 +319,29 @@ class Hunyuan3DPaintPipeline:
             else:
                 image_prompt = image[i]
             images_prompt.append(image_prompt)
-            
+
         images_prompt = [self.recenter_image(image_prompt) for image_prompt in images_prompt]
 
-        # On MPS, the delight preprocessor can produce unstable outputs (noise).
-        # Skip it unless explicitly enabled and available.
+        # Delight preprocessing runs the InstructPix2Pix model on CPU/float32 on
+        # MPS (see Light_Shadow_Remover) to avoid fp16 instability there; on other
+        # devices it uses the configured device/dtype. Still opt-in by default.
         use_delight = (
             os.environ.get('HY3D_USE_DELIGHT', '0') == '1'
-            and self.config.device != 'mps'
-            and self.models['delight_model'] is not None
+            and self._delight_available
         )
         if use_delight:
-            images_prompt = [self.models['delight_model'](image_prompt) for image_prompt in images_prompt]
+            if progress_callback is not None:
+                progress_callback(0.03, "Delight preprocessing...")
+            delight_model = self._get_delight_model()
+            logger.debug("Delight preprocessing...")
+            images_prompt = [delight_model(image_prompt) for image_prompt in images_prompt]
+            logger.debug("Delight preprocessing done")
 
         overlap_uv_unwrap = os.environ.get('HY3D_OVERLAP_UV_UNWRAP', '0') == '1'
+
+        if progress_callback is not None:
+            progress_callback(0.08, "UV wrapping...")
+        logger.debug("UV wrapping...")
         if overlap_uv_unwrap:
             # Fast path: overlap UV unwrapping on CPU with multiview diffusion on GPU.
             # This improves throughput substantially, but can introduce small texture
@@ -324,10 +355,21 @@ class Hunyuan3DPaintPipeline:
         selected_camera_elevs, selected_camera_azims, selected_view_weights = \
             self.config.candidate_camera_elevs, self.config.candidate_camera_azims, self.config.candidate_view_weights
 
+        # The multiview diffusion model consumes control images at its own
+        # native view_size (512) regardless of render_size, so render them
+        # directly at that resolution instead of at render_size (up to 2048)
+        # only to have the model immediately downsample them back down.
+        view_size = self.models['multiview_model'].view_size
+        if progress_callback is not None:
+            progress_callback(0.12, "Rendering normal maps...")
+        logger.debug("Rendering normal maps...")
         normal_maps = self.render_normal_multiview(
-            selected_camera_elevs, selected_camera_azims, use_abs_coor=True)
+            selected_camera_elevs, selected_camera_azims, use_abs_coor=True, resolution=view_size)
+        if progress_callback is not None:
+            progress_callback(0.16, "Rendering position maps...")
+        logger.debug("Rendering position maps...")
         position_maps = self.render_position_multiview(
-            selected_camera_elevs, selected_camera_azims)
+            selected_camera_elevs, selected_camera_azims, resolution=view_size)
 
         uv_future = None
         mesh_executor = None
@@ -343,27 +385,47 @@ class Hunyuan3DPaintPipeline:
         camera_info = [(((azim // 30) + 9) % 12) // {-20: 1, 0: 1, 20: 1, -90: 3, 90: 3}[
             elev] + {-20: 0, 0: 12, 20: 24, -90: 36, 90: 40}[elev] for azim, elev in
                        zip(selected_camera_azims, selected_camera_elevs)]
-        multiviews = self.models['multiview_model'](images_prompt, normal_maps + position_maps, camera_info)
+        if progress_callback is not None:
+            progress_callback(0.20, "Starting multiview diffusion...")
+        multiviews = self.models['multiview_model'](
+            images_prompt, normal_maps + position_maps, camera_info, seed=seed,
+            progress_callback=_scaled_progress(progress_callback, 0.20, 0.85),
+        )
 
         if uv_future is not None:
             uv_ready_mesh = uv_future.result()
             mesh_executor.shutdown(wait=False)
             self.render.load_mesh(uv_ready_mesh)
 
-        for i in range(len(multiviews)):
-            # multiviews[i] = self.models['super_model'](multiviews[i])
-            multiviews[i] = multiviews[i].resize(
-                (self.config.render_size, self.config.render_size))
+        # multiviews are already native view_size (512) from the diffusion
+        # model; baking directly at that resolution (back_project rasterizes
+        # at the input image's own size) avoids wasted rasterization work
+        # from upscaling to render_size first, since super-resolution is
+        # currently disabled and a plain resize adds no real detail.
+        # for i in range(len(multiviews)):
+        #     multiviews[i] = self.models['super_model'](multiviews[i])
 
+        if progress_callback is not None:
+            progress_callback(0.85, "Baking multiview -> UV texture...")
+        logger.debug("Baking multiview -> UV texture...")
         texture, mask = self.bake_from_multiview(multiviews,
                                                  selected_camera_elevs, selected_camera_azims, selected_view_weights,
                                                  method=self.config.merge_method)
 
+        if progress_callback is not None:
+            progress_callback(0.92, "Inpainting texture seams...")
+        logger.debug("Inpainting texture seams...")
         mask_np = (mask.squeeze(-1).cpu().numpy() * 255).astype(np.uint8)
 
         texture = self.texture_inpaint(texture, mask_np)
 
+        if progress_callback is not None:
+            progress_callback(0.97, "Exporting mesh...")
+        logger.debug("Exporting mesh...")
         self.render.set_texture(texture)
         textured_mesh = self.render.save_mesh()
+
+        if progress_callback is not None:
+            progress_callback(1.0, "Texturing done")
 
         return textured_mesh

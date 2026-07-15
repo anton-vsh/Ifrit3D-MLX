@@ -25,15 +25,20 @@ class Light_Shadow_Remover():
         self.cfg_image = 1.5
         self.cfg_text = 1.0
 
+        # On MPS, running this InstructPix2Pix model in float16 can produce
+        # unstable outputs (noise); fall back to CPU/float32 there only.
+        pipeline_device = "cpu" if self.device == "mps" else self.device
+        pipeline_dtype = torch.float32 if self.device == "mps" else torch.float16
+
         pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
             config.light_remover_ckpt_path,
-            torch_dtype=torch.float16,
+            torch_dtype=pipeline_dtype,
             safety_checker=None,
         )
         pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(pipeline.scheduler.config)
         pipeline.set_progress_bar_config(disable=True)
 
-        self.pipeline = pipeline.to(self.device, torch.float16)
+        self.pipeline = pipeline.to(pipeline_device, pipeline_dtype)
     
     def recorrect_rgb(self, src_image, target_image, alpha_channel, scale=0.95):
         

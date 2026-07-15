@@ -1,6 +1,8 @@
-# Hunyuan3D on Apple Silicon M{PS, LX}
+# Ifrit3D-MLX
 
-Full reference implementation of Hunyuan3D inference on native Apple Silicon, including MLX texturing. 
+Full reference implementation of Hunyuan3D inference on native Apple Silicon, including MLX texturing, plus a full Gradio UI and a standalone macOS app.
+
+Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
 **Project/docs are a WIP and all contributions are welcome.** Writeup on all the optimizations that was done coming soon (i.e. some work trimming down CPU UV Unwrapping, among other kernel stuff). This is a continuation of a months long attempt to port Hunyuan3D-Paint to MPS since last December.
 
@@ -54,7 +56,7 @@ Install and usage notes: [hy3d_mlx_comfyui/README.md](hy3d_mlx_comfyui/README.md
 
 ### 2) Install
 ```bash
-cd Hunyuan3D-MLX
+cd Ifrit3D-MLX
 uv sync
 ```
 
@@ -208,7 +210,7 @@ uv run python paint/2.0/turbo/convert_mlx.py <path-to-hunyuan3d-paint-v2-0-turbo
 ```
 
 ## Credits
-Derivative work of [Tencent](https://github.com/Tencent-Hunyuan/Hunyuan3D-2), [Lane et. al](https://arxiv.org/abs/2011.03277), and pedronaugusto.
+Ifrit3D-MLX is maintained by [Anton Shlyonkin](https://www.shlyonk.in), built on top of [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX), which is itself a derivative work of [Tencent](https://github.com/Tencent-Hunyuan/Hunyuan3D-2), [Lane et. al](https://arxiv.org/abs/2011.03277), and pedronaugusto.
 
 Model and derivative models respect the `TENCENT HUNYUAN 3D 2.0 COMMUNITY LICENSE AGREEMENT`, see [legal](legal/hunyuan/)
 

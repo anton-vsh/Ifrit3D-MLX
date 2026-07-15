@@ -92,10 +92,11 @@ def export_mesh(input, output):
     if isinstance(input, pymeshlab.MeshSet):
         mesh = output
     elif isinstance(input, Latent2MeshOutput):
-        output = Latent2MeshOutput()
-        output.mesh_v = output.current_mesh().vertex_matrix()
-        output.mesh_f = output.current_mesh().face_matrix()
-        mesh = output
+        current_mesh = output.current_mesh()
+        mesh = Latent2MeshOutput(
+            mesh_v=current_mesh.vertex_matrix(),
+            mesh_f=current_mesh.face_matrix(),
+        )
     else:
         mesh = pymeshlab2trimesh(output)
     return mesh

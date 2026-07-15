@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -154,9 +156,82 @@ def choose_shape_model(mode: str, args, forced_preset: Optional[str] = None) -> 
     return SHAPE_PRESETS[default_preset]
 
 
-def run_shape_pipeline(image_paths: List[Path], mode: str, args, forced_preset: Optional[str] = None):
-    import torch
+# Single-slot cache: process-lifetime reuse of the loaded shape pipeline across
+# calls with the same (model_repo, subfolder, variant, use_safetensors, device).
+# A fresh process (CLI usage) gets an empty cache and behaves exactly as before.
+_SHAPE_CACHE_KEY = None
+_SHAPE_CACHE_PIPELINE = None
+_SHAPE_CACHE_LOCK = threading.Lock()
+
+
+def get_or_load_shape_pipeline(model_repo, subfolder, variant, use_safetensors, device):
     from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+
+    global _SHAPE_CACHE_KEY, _SHAPE_CACHE_PIPELINE
+
+    key = (model_repo, subfolder, variant, use_safetensors, device)
+    with _SHAPE_CACHE_LOCK:
+        if _SHAPE_CACHE_KEY != key:
+            if _SHAPE_CACHE_PIPELINE is not None:
+                import gc
+                import torch
+                _SHAPE_CACHE_PIPELINE.to("cpu")
+                _SHAPE_CACHE_PIPELINE = None
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                gc.collect()
+
+            load_kwargs = {
+                "model_path": model_repo,
+                "subfolder": subfolder,
+                "device": device,
+                "use_safetensors": use_safetensors,
+            }
+            if variant:
+                load_kwargs["variant"] = variant
+
+            _SHAPE_CACHE_PIPELINE = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(**load_kwargs)
+            _SHAPE_CACHE_KEY = key
+
+        pipeline = _SHAPE_CACHE_PIPELINE
+
+    # enable_flashvdm() reloads a VAE checkpoint in both directions (enable and
+    # disable), so only call it when the desired state actually differs from
+    # what's already applied — otherwise every cache hit would pay that cost.
+    want_flashvdm = os.environ.get('HY3D_USE_FLASHVDM', '0') == '1'
+    if getattr(pipeline, '_flashvdm_enabled', False) != want_flashvdm:
+        pipeline.enable_flashvdm(enabled=want_flashvdm)
+        pipeline._flashvdm_enabled = want_flashvdm
+
+    return pipeline
+
+
+def _filter_mesh_fragments(mesh, min_faces=None):
+    import trimesh
+
+    if min_faces is None:
+        min_faces = int(os.environ.get('HY3D_FRAGMENT_MIN_FACES', '20'))
+
+    total_faces = len(mesh.faces)
+    if total_faces == 0:
+        return mesh
+
+    components = mesh.split(only_watertight=False)
+    if len(components) <= 1:
+        return mesh
+
+    threshold = max(min_faces, int(total_faces * 0.001))
+    kept = [c for c in components if len(c.faces) >= threshold]
+    if not kept:
+        return mesh
+
+    print(f"[shape] fragment filter: kept {len(kept)}/{len(components)} components "
+          f"(threshold={threshold} faces)")
+    return trimesh.util.concatenate(kept)
+
+
+def run_shape_pipeline(image_paths: List[Path], mode: str, args, forced_preset: Optional[str] = None, progress_callback=None):
+    import torch
 
     device = pick_device()
     model_repo, subfolder = choose_shape_model(mode, args, forced_preset=forced_preset)
@@ -167,19 +242,24 @@ def run_shape_pipeline(image_paths: List[Path], mode: str, args, forced_preset: 
     images = load_pil_images(image_paths, use_rembg=not args.no_rembg)
     image_input = images[0] if len(images) == 1 else {"front": images[0], "left": images[1], "back": images[2]}
 
-    load_kwargs = {
-        "model_path": model_repo,
-        "subfolder": subfolder,
-        "device": device,
-        "use_safetensors": not args.no_shape_safetensors,
-    }
-    if args.shape_variant:
-        load_kwargs["variant"] = args.shape_variant
-
-    pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(**load_kwargs)
+    pipeline = get_or_load_shape_pipeline(
+        model_repo, subfolder, args.shape_variant, not args.no_shape_safetensors, device,
+    )
 
     gen = torch.manual_seed(args.seed)
     t0 = time.time()
+    print(f"[shape] pipeline call: steps={args.shape_steps}, octree={args.shape_octree_resolution}, chunks={args.shape_num_chunks}")
+
+    step_kwargs = {}
+    if progress_callback is not None:
+        total_steps = args.shape_steps
+
+        def _on_step(step_idx, t, outputs):
+            progress_callback((step_idx + 1) / total_steps, f"Shape diffusion — step {step_idx + 1}/{total_steps}")
+
+        step_kwargs["callback"] = _on_step
+        step_kwargs["callback_steps"] = 1
+
     mesh = pipeline(
         image=image_input,
         num_inference_steps=args.shape_steps,
@@ -187,10 +267,15 @@ def run_shape_pipeline(image_paths: List[Path], mode: str, args, forced_preset: 
         num_chunks=args.shape_num_chunks,
         generator=gen,
         output_type="trimesh",
+        **step_kwargs,
     )[0]
     print(f"shape_device={device}")
     print(f"shape_model={model_repo}/{subfolder}")
     print(f"shape_time={time.time() - t0:.1f}s")
+
+    if os.environ.get('HY3D_USE_FLASHVDM', '0') == '1':
+        mesh = _filter_mesh_fragments(mesh)
+
     return mesh
 
 

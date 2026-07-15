@@ -12,6 +12,7 @@
 # fine-tuning enabling code and other elements of the foregoing made publicly available
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
+import logging
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy
@@ -43,6 +44,9 @@ from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPV
 
 from .unet.modules import UNet2p5DConditionModel, \
     compute_multi_resolution_mask, compute_multi_resolution_discrete_voxel_indice
+
+logger = logging.getLogger(__name__)
+
 
 def guidance_scale_embedding(w, embedding_dim=512, dtype=torch.float32):
     """
@@ -699,10 +703,13 @@ class HunyuanPaintPipeline(StableDiffusionPipeline):
                         callback(step_idx, t, latents)
 
         if not output_type == "latent":
+            logger.debug("Denoising complete, starting VAE decode...")
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
                 0
             ]
+            logger.debug("VAE decode done, running safety check...")
             image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+            logger.debug("Safety check done, postprocessing...")
         else:
             image = latents
             has_nsfw_concept = None
@@ -713,6 +720,7 @@ class HunyuanPaintPipeline(StableDiffusionPipeline):
             do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
         image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+        logger.debug("Postprocess done")
 
         # Offload all models
         self.maybe_free_model_hooks()

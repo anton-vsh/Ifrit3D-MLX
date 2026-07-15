@@ -123,9 +123,9 @@ class Multiview_Diffusion_Net():
         torch.manual_seed(seed)
         os.environ["PL_GLOBAL_SEED"] = str(seed)
 
-    def __call__(self, input_images, control_images, camera_info):
+    def __call__(self, input_images, control_images, camera_info, seed=0, progress_callback=None):
 
-        self.seed_everything(0)
+        self.seed_everything(seed)
 
         if not isinstance(input_images, List):
             input_images = [input_images]
@@ -136,7 +136,21 @@ class Multiview_Diffusion_Net():
             if control_images[i].mode == 'L':
                 control_images[i] = control_images[i].point(lambda x: 255 if x > 1 else 0, mode='1')
 
-        kwargs = dict(generator=torch.Generator(device=self.pipeline.device).manual_seed(0))
+        kwargs = dict(generator=torch.Generator(device=self.pipeline.device).manual_seed(seed))
+
+        num_inference_steps = 30
+        step_kwargs = {}
+        if progress_callback is not None:
+            def _on_step_end(pipe, step, timestep, callback_kwargs):
+                # Turbo/LCM schedulers resolve fewer actual timesteps than the
+                # requested num_inference_steps; `_num_timesteps` (set by the
+                # pipeline right before its denoising loop) reflects what will
+                # really run, so the displayed total doesn't get stuck early.
+                total = getattr(pipe, "_num_timesteps", num_inference_steps)
+                progress_callback((step + 1) / total, f"Multiview diffusion — step {step + 1}/{total}")
+                return callback_kwargs
+
+            step_kwargs["callback_on_step_end"] = _on_step_end
 
         num_view = len(control_images) // 2
         normal_image = [[control_images[i] for i in range(num_view)]]
@@ -159,12 +173,13 @@ class Multiview_Diffusion_Net():
                 )
             mvd_image = self.pipeline(
                 input_images[0:1],
-                num_inference_steps=30,
+                num_inference_steps=num_inference_steps,
                 guidance_scale=3.0,
                 **kwargs,
+                **step_kwargs,
             ).images
 
-            # Current Hunyuan3D-MLX texture baker expects a list of albedo multiview images.
+            # Current Ifrit3D-MLX texture baker expects a list of albedo multiview images.
             return mvd_image[:num_view]
 
         camera_info_gen = [camera_info]
@@ -174,6 +189,6 @@ class Multiview_Diffusion_Net():
         kwargs["normal_imgs"] = normal_image
         kwargs["position_imgs"] = position_image
 
-        mvd_image = self.pipeline(input_images, num_inference_steps=30, **kwargs).images
+        mvd_image = self.pipeline(input_images, num_inference_steps=num_inference_steps, **kwargs, **step_kwargs).images
 
         return mvd_image
