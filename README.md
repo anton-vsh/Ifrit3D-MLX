@@ -11,6 +11,21 @@ Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
 ---
 
+## What's new in Ifrit3D-MLX
+
+This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX) (CLI-only) and has grown into a full application on top of it:
+
+- **Gradio UI** (`app.py`) — Image-to-3D and Text-to-3D tabs, covering shape generation, texturing, polygon reduction, and upscaling without touching a terminal.
+- **Standalone macOS app** — the same UI packaged as a double-clickable `.app`/`.dmg` with a menu bar helper (no Terminal window, no Dock icon), model weights downloaded on first use into `~/Library/Application Support/`. See [Releases](../../releases) for a prebuilt build, or `scripts/build_app.sh` to build your own.
+- **Pipeline caching** — shape and paint pipelines stay loaded across generations instead of reloading from disk every run.
+- **FlashVDM volume decoder** — an optional faster decode path, with fragment filtering to clean up the mesh artifacts it can introduce.
+- **Multi-view shape input** — reconstruct from front + left + back images instead of a single photo, for shape models that support it.
+- **Re-texture with seed** — re-run just the texturing pass on an existing mesh with a new (or fixed) seed, without regenerating the shape.
+- **Upscale** — regenerate a result at higher resolution/step counts, with optional SD-based input image refinement first.
+- **Granular progress reporting** — per-diffusion-step progress in the UI instead of a single stalled bar for the whole shape or texture pass.
+
+---
+
 ## ComfyUI
 
 There is also a standalone ComfyUI custom node package in [hy3d_mlx_comfyui](hy3d_mlx_comfyui/).
