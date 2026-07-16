@@ -57,8 +57,48 @@ This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/Zimeng
 
 
 ## Credits
-Built on top of [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX), which is itself a derivative work of [Tencent](https://github.com/Tencent-Hunyuan/Hunyuan3D-2), [Lane et. al](https://arxiv.org/abs/2011.03277), and pedronaugusto.
 
-Model and derivative models respect the `TENCENT HUNYUAN 3D 2.0 COMMUNITY LICENSE AGREEMENT`, see [legal](legal/hunyuan/)
+This project builds upon the work of:
 
-All other work is licensed under [MIT](LICENSE).
+- [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX)
+- [Tencent Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2)
+- [TRELLIS](https://github.com/microsoft/TRELLIS) (Lane et al., 2024)
+- [pedronaugusto](https://github.com/pedronaugusto) — MLX implementation and related contributions
+- [Stability AI SD Turbo](https://huggingface.co/stabilityai/sd-turbo)
+- [PyMeshLab](https://github.com/cnr-isti-vclab/PyMeshLab) / [VCGLib](https://github.com/cnr-isti-vclab/vcglib) — mesh simplification
+- [xatlas](https://github.com/jpcy/xatlas) — UV atlas generation
+- Garland & Heckbert (1997), *Surface Simplification Using Quadric Error Metrics* — https://www.cs.cmu.edu/~garland/Papers/quadrics.pdf
+
+## Third-Party Components
+
+This project also includes or depends on the following third-party software:
+
+| Component | License |
+|----------|---------|
+| Hunyuan3D-2 | Tencent Hunyuan 3D 2.0 Community License |
+| SD Turbo | Stability AI Community License |
+| diffusers | Apache 2.0 |
+| transformers | Apache 2.0 |
+| Gradio | Apache 2.0 |
+| OpenCV | Apache 2.0 |
+| PyTorch | BSD-3-Clause |
+| MLX | MIT |
+| trimesh | MIT |
+| rembg | MIT |
+| einops | MIT |
+| OmegaConf | BSD-3-Clause |
+| PyMeshLab | MIT |
+| VCGLib | BSD-2-Clause |
+| xatlas | MIT |
+| mtldiffrast | See `libraries/mtldiffrast/LICENSE.txt` |
+| mtlbvh | See `libraries/mtlbvh/LICENSE.txt` |
+| mtlmesh | See `libraries/mtlmesh/LICENSE` |
+| mtlgemm | See `libraries/mtlgemm/LICENSE` |
+
+## Licensing
+
+Models based on Hunyuan3D are subject to the **TENCENT HUNYUAN 3D 2.0 COMMUNITY LICENSE AGREEMENT**. See the [legal/hunyuan](legal/hunyuan/) directory.
+
+SD Turbo models are subject to the Stability AI Community License.
+
+Unless otherwise noted, all original code and modifications in this repository are licensed under the [MIT License](LICENSE).
