@@ -12,6 +12,9 @@ Full reference implementation of Hunyuan3D inference on native Apple Silicon, in
 
 Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
+<img width="1443" height="637" alt="Снимок экрана — 2026-07-16 в 23 43 14" src="https://github.com/user-attachments/assets/fb136e6f-0960-4515-b570-98356919be0c" />
+
+
 ---
 
 ## What's new in Ifrit3D-MLX
