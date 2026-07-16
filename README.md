@@ -2,6 +2,10 @@
 
 Spiritual successor to Luma Genie (RIP). Now you can generate whose «ugly» (but incredibly cozy) 3D models once again (upscale option included). As a cherry on the cake, you can also generate robust lowpoly models and «normal» high poly aswell.
 
+<img width="1551" height="892" alt="Снимок экрана — 2026-07-16 в 13 48 36" src="https://github.com/user-attachments/assets/e8829d46-c764-40a5-bbe5-abf3171621a9" />
+
+
+
 Huge thank you to the authors of the original models and MLX port.
 
 Full reference implementation of Hunyuan3D inference on native Apple Silicon, including MLX texturing, plus a full Gradio UI and a standalone macOS app.
@@ -10,7 +14,7 @@ Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
 ---
 
-## What's new in Ifrit3D-MLX compared to originam Hunyuan3d-MLX
+## What's new in Ifrit3D-MLX
 
 This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX) (CLI-only) and has grown into a full application on top of it:
 
@@ -46,7 +50,11 @@ This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/Zimeng
 
 ## Setup / install
 
-Use «Releases» section to download .dmg and install as a regular .app
+1. Use «Releases» section to download .dmg and install as a regular .app
+2. Open the .dmg, drag Ifrit3D-MLX.app into Applications.
+3. First launch only: right-click (or Control-click) the app → Open → Open in the confirmation dialog. This build is ad-hoc signed, not notarized (no Apple Developer Program), so Gatekeeper shows one "unidentified developer" warning on first launch. After that one approval, double-click works normally from then on.
+4. On first use, model weights download automatically (takes time) into ~/Library/Application Support/Ifrit3D-MLX/ — no manual setup needed.
+
 
 ## Credits
 Built on top of [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX), which is itself a derivative work of [Tencent](https://github.com/Tencent-Hunyuan/Hunyuan3D-2), [Lane et. al](https://arxiv.org/abs/2011.03277), and pedronaugusto.
