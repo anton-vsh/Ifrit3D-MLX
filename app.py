@@ -389,7 +389,9 @@ def generate(
         shape_model_repo=None,
         shape_subfolder=None,
         shape_variant="fp16",
-        no_shape_safetensors=False,
+        # tencent/Hunyuan3D-2.1's hunyuan3d-dit-v2-1 subfolder only ships
+        # model.fp16.ckpt, not model.fp16.safetensors like every other preset.
+        no_shape_safetensors=(shape_preset == "2.1"),
         shape_steps=shape_steps,
         shape_octree_resolution=shape_octree_resolution,
         shape_num_chunks=12000,
