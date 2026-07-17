@@ -75,21 +75,37 @@ class Multiview_Diffusion_Net():
                     inner_unet.learned_text_clip_gen = inner_unet.learned_text_clip_ref
 
         backend = getattr(config, 'diffusion_backend', 'pytorch')
-        if backend == 'mlx' and self.is_pbr:
-            # Keep the heavy PyTorch pipeline on CPU for 2.1 MLX mode.
-            # MLX handles the UNet compute; keeping PyTorch weights off MPS avoids unified-memory kills.
-            self.pipeline = pipeline
-        else:
-            self.pipeline = pipeline.to(self.device)
+        # hybrid_unet.py's MLX UNet wrapper infers batch size from raw tensor
+        # size and has no notion of classifier-free-guidance batch doubling.
+        # The non-turbo ("hunyuanpaint") pipeline doubles the latent batch for
+        # CFG when guidance_scale > 1, which desyncs that inference and
+        # scrambles the uncond/cond split — producing colored-noise output.
+        # Turbo never hits this (it disables CFG doubling outright via
+        # is_turbo), so only "hunyuanpaint" + mlx needs CFG forced off here.
+        self._force_no_cfg = backend == 'mlx' and config.pipe_name == 'hunyuanpaint'
+        # Move the whole pipeline to MPS even for PBR+MLX: the VAE and text
+        # encoder still run as real PyTorch fp16 ops and are catastrophically
+        # slow on CPU (Apple Silicon has no fast fp16 CPU kernels — a single
+        # VAE encode() that takes ~1s on MPS can take 30+ minutes on CPU,
+        # indistinguishable from a hang). Only the UNet's PyTorch weights are
+        # evicted back to CPU below, once MLX has taken over its forward pass.
+        self.pipeline = pipeline.to(self.device)
 
         self.dino_v2 = None
         if self.is_pbr and hasattr(self.pipeline.unet, "use_dino") and self.pipeline.unet.use_dino:
             try:
                 from ..hunyuanpaintpbr.unet.modules import Dino_v2
+                # Tencent's reference hy3dpaint/textureGenPipeline.py loads DINOv2
+                # from the "facebook/dinov2-giant" HF repo directly (not bundled
+                # inside the paint checkpoint) — fall back to that when a local
+                # "mvd_std" copy isn't present, since without it the model gets
+                # a zero-tensor placeholder instead of real image features and
+                # generates content unrelated to the reference image.
                 dino_ckpt_path = os.path.join(multiview_ckpt_path, "mvd_std")
-                if os.path.exists(dino_ckpt_path):
-                    self.dino_v2 = Dino_v2(dino_ckpt_path).to(torch.float16)
-                    self.dino_v2 = self.dino_v2.to(self.device)
+                if not os.path.exists(dino_ckpt_path):
+                    dino_ckpt_path = "facebook/dinov2-giant"
+                self.dino_v2 = Dino_v2(dino_ckpt_path).to(torch.float16)
+                self.dino_v2 = self.dino_v2.to(self.device)
             except Exception as e:
                 print(f"[WARN] Failed to load Dino_v2 for 2.1 PBR pipeline: {e}")
 
@@ -99,6 +115,12 @@ class Multiview_Diffusion_Net():
                 raise RuntimeError(
                     f"[MLX] backend=mlx requires MPS device, got: {self.device}"
                 )
+            pbr_albedo_only = self.is_pbr and getattr(config, 'pbr_albedo_only', False)
+            if pbr_albedo_only:
+                # Pipeline pre/post-processing (batch construction, learned-embedding
+                # lookup) reads this generically rather than hardcoding 2 channels —
+                # see hunyuanpaintpbr/pipeline.py's n_pbr = len(self.unet.pbr_setting).
+                self.pipeline.unet.pbr_setting = ["albedo"]
             try:
                 from ..mlx.hybrid_unet import HybridMLXUNet
 
@@ -107,6 +129,7 @@ class Multiview_Diffusion_Net():
                     model_path=multiview_ckpt_path,
                     weights_path=getattr(config, 'mlx_weights_path', None),
                     profile=getattr(config, 'mlx_profile', None),
+                    pbr_albedo_only=pbr_albedo_only,
                 )
 
                 # Free MPS memory: MLX owns the UNet weights now.
@@ -188,6 +211,9 @@ class Multiview_Diffusion_Net():
         kwargs['camera_info_ref'] = camera_info_ref
         kwargs["normal_imgs"] = normal_image
         kwargs["position_imgs"] = position_image
+
+        if self._force_no_cfg:
+            kwargs['guidance_scale'] = 1.0
 
         mvd_image = self.pipeline(input_images, num_inference_steps=num_inference_steps, **kwargs, **step_kwargs).images
 

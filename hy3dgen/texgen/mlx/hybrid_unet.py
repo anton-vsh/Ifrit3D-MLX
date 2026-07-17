@@ -15,10 +15,12 @@ import time
 from typing import Optional
 
 import mlx.core as mx
+import mlx.utils
 import numpy as np
 import torch
 
 from .unet import HunyuanUNet2p5D
+from ..hunyuanpaintpbr.unet.modules import calc_multires_voxel_idxs
 
 
 PROFILE_PAINT_20 = "paint-2.0"
@@ -59,13 +61,23 @@ def _resolve_weights_path(model_path: str, weights_path: Optional[str], profile:
 class HybridMLXUNet:
     """Wraps MLX UNet to match PyTorch UNet2p5DConditionModel interface."""
 
-    def __init__(self, model_path: str, weights_path: Optional[str] = None, profile: Optional[str] = None):
+    def __init__(
+        self,
+        model_path: str,
+        weights_path: Optional[str] = None,
+        profile: Optional[str] = None,
+        pbr_albedo_only: bool = False,
+    ):
         """Load MLX UNet from converted weights.
 
         Args:
             model_path: Paint model directory (contains unet/)
             weights_path: Directory containing unet.npz
             profile: paint-2.0 or paint-pbr-2.1 (auto if None)
+            pbr_albedo_only: for paint-pbr-2.1, build/load only the "albedo"
+                material branch and skip "mr" (metallic-roughness) entirely —
+                roughly halves multiview diffusion compute for callers that
+                only need a basic (non-PBR) texture.
         """
         self.profile = _infer_profile(model_path, profile)
         weights_path = _resolve_weights_path(model_path, weights_path, self.profile)
@@ -80,8 +92,9 @@ class HybridMLXUNet:
 
         if self.profile == PROFILE_PAINT_20:
             # Legacy runtime path in this repo (single material, no DINO/MDA).
+            self.pbr_settings = ["albedo"]
             self.mlx_unet = HunyuanUNet2p5D(
-                pbr_settings=["albedo"],
+                pbr_settings=self.pbr_settings,
                 cross_attention_dim=1024,
                 out_channels=4,
                 block_out_channels=(320, 640, 1280, 1280),
@@ -94,8 +107,13 @@ class HybridMLXUNet:
                 use_camera_embedding=True,
             )
         else:
+            # Material-dimension attention (use_mda) and DINO conditioning stay
+            # on regardless of pbr_albedo_only — pbr_settings is a genuine
+            # variable-length construction param (see transformer_block.py),
+            # not something use_mda hardcodes to exactly 2 entries.
+            self.pbr_settings = ["albedo"] if pbr_albedo_only else ["albedo", "mr"]
             self.mlx_unet = HunyuanUNet2p5D(
-                pbr_settings=["albedo", "mr"],
+                pbr_settings=self.pbr_settings,
                 cross_attention_dim=1024,
                 out_channels=4,
                 block_out_channels=(320, 640, 1280, 1280),
@@ -108,11 +126,25 @@ class HybridMLXUNet:
                 use_camera_embedding=False,
             )
 
-        print(f"[MLX] Loading UNet weights ({self.profile}) from {weights_path} ...")
+        print(f"[MLX] Loading UNet weights ({self.profile}, pbr_settings={self.pbr_settings}) from {weights_path} ...")
         t0 = time.time()
         raw = dict(np.load(unet_npz, allow_pickle=True))
-        self.mlx_unet.load_weights([(k, mx.array(v)) for k, v in raw.items()])
-        print(f"[MLX] Loaded {len(raw)} weights in {time.time() - t0:.1f}s")
+        if pbr_albedo_only and self.profile != PROFILE_PAINT_20:
+            # The checkpoint was converted for the full 2-channel (albedo+mr)
+            # model. Filter to just the keys this smaller model actually has —
+            # verified this is a clean subset (no partially-shared tensors):
+            # filtering to the albedo-only model's own param names skips
+            # exactly the "*_mr*"/"learned_text_clip_mr" keys with zero
+            # missing/mismatched entries, then a strict=True load confirms
+            # full coverage instead of silently leaving something zero-init.
+            model_param_names = {name for name, _ in mlx.utils.tree_flatten(self.mlx_unet.parameters())}
+            weights = [(k, mx.array(v)) for k, v in raw.items() if k in model_param_names]
+            skipped = len(raw) - len(weights)
+            self.mlx_unet.load_weights(weights, strict=True)
+            print(f"[MLX] Loaded {len(weights)} weights in {time.time() - t0:.1f}s (skipped {skipped} mr-only keys)")
+        else:
+            self.mlx_unet.load_weights([(k, mx.array(v)) for k, v in raw.items()])
+            print(f"[MLX] Loaded {len(raw)} weights in {time.time() - t0:.1f}s")
         del raw
 
         self._cache = {}
@@ -155,6 +187,9 @@ class HybridMLXUNet:
         embeds_position = kwargs.get("embeds_position", kwargs.get("position_imgs"))
         ref_latents = kwargs.get("ref_latents")
         dino_hidden_states = kwargs.get("dino_hidden_states")
+        # Raw (non-VAE-encoded) position maps — used only for 3D RoPE voxel
+        # indices below, distinct from embeds_position (the encoded version).
+        position_maps = kwargs.get("position_maps")
         
         # View/Camera info
         class_labels = kwargs.get("class_labels", kwargs.get("camera_info_gen"))
@@ -176,7 +211,7 @@ class HybridMLXUNet:
 
         # PyTorch pipeline passes sample in various formats ([Total, C, H, W] or [B, Total, C, H, W])
         # We must normalize to [B, N_pbr, N_gen, C, H, W] for MLX UNet
-        n_pbr = 2 if self.profile == PROFILE_PAINT_PBR_21 else 1
+        n_pbr = len(self.pbr_settings)
         
         if "num_in_batch" in kwargs:
             num_in_batch = kwargs["num_in_batch"]
@@ -192,7 +227,32 @@ class HybridMLXUNet:
 
         # Reshape to standard 6D: [B, N_pbr, N_gen, C, H, W]
         sample_np = sample_np.reshape(batch_size, n_pbr, num_in_batch, *sample_np.shape[-3:])
-        
+
+        # 3D RoPE voxel indices for multiview cross-attention (position-aware
+        # attention correlating the same 3D surface point across views).
+        # use_position_rope=True is unconditional on the PyTorch side
+        # (hunyuanpaintpbr/unet/modules.py) — without this, multiview
+        # attention here was silently running position-blind, degrading
+        # cross-view detail/consistency. calc_multires_voxel_idxs is pure
+        # PyTorch tensor math (no model weights), so it's called directly on
+        # the raw position_maps tensor before any MLX conversion, matching
+        # exactly what the PyTorch UNet computes for the same input.
+        position_voxel_indices = None
+        if position_maps is not None:
+            H = sample_np.shape[-2]
+            pt_voxel_indices = calc_multires_voxel_idxs(
+                position_maps,
+                grid_resolutions=[H, H // 2, H // 4, H // 8],
+                voxel_resolutions=[H * 8, H * 4, H * 2, H],
+            )
+            position_voxel_indices = {
+                seq_len: {
+                    "voxel_indices": mx.array(entry["voxel_indices"].cpu().numpy()),
+                    "voxel_resolution": entry["voxel_resolution"],
+                }
+                for seq_len, entry in pt_voxel_indices.items()
+            }
+
         # Normalize encoder hidden states to [B, N_pbr, Seq, Dim]
         # Pipeline passes [B_total, Seq, Dim]
         enc_item_size = enc_np.shape[-2] * enc_np.shape[-1]
@@ -228,6 +288,7 @@ class HybridMLXUNet:
             embeds_position=mx.array(self._to_np(embeds_position)) if embeds_position is not None else None,
             ref_latents=mx.array(self._to_np(ref_latents)) if ref_latents is not None else None,
             dino_hidden_states=mx.array(self._to_np(dino_hidden_states)) if dino_hidden_states is not None else None,
+            position_voxel_indices=position_voxel_indices,
             class_labels=mx.array(self._to_np(class_labels)).astype(mx.int64).reshape(-1) if class_labels is not None else None,
             camera_info_ref=mx.array(self._to_np(camera_info_ref)).astype(mx.int64).reshape(-1) if camera_info_ref is not None else None,
             mva_scale=mva_scale,
@@ -253,9 +314,12 @@ class HybridMLXUNet:
         model_path: str,
         weights_path: Optional[str] = None,
         profile: Optional[str] = None,
+        pbr_albedo_only: bool = False,
     ):
         """Patch an existing diffusers HunyuanPaintPipeline to use MLX UNet."""
-        hybrid = HybridMLXUNet(model_path, weights_path=weights_path, profile=profile)
+        hybrid = HybridMLXUNet(
+            model_path, weights_path=weights_path, profile=profile, pbr_albedo_only=pbr_albedo_only
+        )
 
         original_forward = pipeline.unet.forward
         pipeline.unet._original_forward = original_forward

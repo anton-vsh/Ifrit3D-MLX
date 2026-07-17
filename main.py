@@ -147,12 +147,15 @@ _PAINT_CACHE_PIPELINE = None
 _PAINT_CACHE_LOCK = threading.Lock()
 
 
-def get_or_load_paint_pipeline(model_repo, subfolder, diffusion_backend, mlx_weights_path):
+def get_or_load_paint_pipeline(model_repo, subfolder, diffusion_backend, mlx_weights_path, pbr_albedo_only=False):
     from hy3dgen.texgen import Hunyuan3DPaintPipeline
 
     global _PAINT_CACHE_KEY, _PAINT_CACHE_PIPELINE
 
-    key = (model_repo, subfolder, diffusion_backend, mlx_weights_path)
+    # pbr_albedo_only must be part of the cache key: a full-PBR and an
+    # albedo-only pipeline are structurally different loaded UNets, not just
+    # a runtime flag on an otherwise-identical pipeline.
+    key = (model_repo, subfolder, diffusion_backend, mlx_weights_path, pbr_albedo_only)
     with _PAINT_CACHE_LOCK:
         if _PAINT_CACHE_KEY != key:
             if _PAINT_CACHE_PIPELINE is not None:
@@ -171,6 +174,7 @@ def get_or_load_paint_pipeline(model_repo, subfolder, diffusion_backend, mlx_wei
                 subfolder=subfolder,
                 diffusion_backend=diffusion_backend,
                 mlx_weights_path=mlx_weights_path,
+                pbr_albedo_only=pbr_albedo_only,
             )
             _PAINT_CACHE_KEY = key
 
@@ -186,6 +190,7 @@ def run_paint_pipeline(mesh, image_paths: List[Path], args, progress_callback=No
 
     painter = get_or_load_paint_pipeline(
         model_repo, subfolder, args.paint_diffusion_backend, args.paint_mlx_weights,
+        pbr_albedo_only=getattr(args, 'paint_basic_texture', False),
     )
     painter.config.render_size = args.paint_render_size
     painter.config.texture_size = args.paint_texture_size
@@ -234,6 +239,12 @@ def add_paint_model_args(p):
     p.add_argument(
         "--paint-mlx-weights",
         help="Optional directory containing converted MLX weights (unet.npz / vae.npz)",
+    )
+    p.add_argument(
+        "--paint-basic-texture",
+        action="store_true",
+        help="For the PBR (2.1) preset: skip metallic-roughness generation, roughly halving "
+        "multiview diffusion time. No effect on other presets (they never generate mr).",
     )
 
 

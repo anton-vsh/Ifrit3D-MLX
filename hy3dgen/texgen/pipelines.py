@@ -51,6 +51,7 @@ class Hunyuan3DTexGenConfig:
         diffusion_backend='pytorch',
         mlx_weights_path=None,
         mlx_profile=None,
+        pbr_albedo_only=False,
     ):
         # Prefer CUDA, then MPS, then CPU.
         self.device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
@@ -60,6 +61,10 @@ class Hunyuan3DTexGenConfig:
         self.diffusion_backend = diffusion_backend
         self.mlx_weights_path = mlx_weights_path
         self.mlx_profile = mlx_profile
+        # Skip "mr" (metallic-roughness) generation for the PBR (2.1) preset —
+        # mr is discarded before export today anyway (see multiview_utils.py),
+        # so this is a pure compute-saving switch, not a change to output.
+        self.pbr_albedo_only = pbr_albedo_only
 
         self.candidate_camera_azims = [0, 90, 180, 270, 0, 180]
         self.candidate_camera_elevs = [0, 0, 0, 0, 90, -90]
@@ -88,6 +93,7 @@ class Hunyuan3DPaintPipeline:
         subfolder='hunyuan3d-paint-v2-0-turbo',
         diffusion_backend='pytorch',
         mlx_weights_path=None,
+        pbr_albedo_only=False,
     ):
         def _infer_mlx_profile(subfolder_name: str) -> str:
             if 'paintpbr' in subfolder_name or 'v2-1' in subfolder_name:
@@ -185,6 +191,7 @@ class Hunyuan3DPaintPipeline:
                 diffusion_backend=diffusion_backend,
                 mlx_weights_path=resolved_mlx_weights_path,
                 mlx_profile=mlx_profile,
+                pbr_albedo_only=pbr_albedo_only,
             )
         )
             

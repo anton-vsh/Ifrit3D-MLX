@@ -724,7 +724,25 @@ class HunyuanPaintPipeline(StableDiffusionPipeline):
                     torch.cuda.empty_cache()
 
         if not output_type == "latent":
-            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+            # Decode in small batch chunks rather than all views/pbr-channels at
+            # once — on MPS with a large multiview*pbr batch this single call can
+            # ask for several GiB in one shot and tip the unified-memory budget
+            # over the edge (observed: "MPS backend out of memory" at this exact
+            # line, first with a 500-face test mesh at chunk size 2, then again
+            # with a full non-simplified mesh at the same chunk size — real
+            # meshes push peak MPS allocation higher, so chunk size 1 + an
+            # explicit cache clear right before decoding gives more headroom).
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+            scaled_latents = latents / self.vae.config.scaling_factor
+            decode_chunk_size = 1
+            image_chunks = [
+                self.vae.decode(
+                    scaled_latents[i:i + decode_chunk_size], return_dict=False, generator=generator
+                )[0]
+                for i in range(0, scaled_latents.shape[0], decode_chunk_size)
+            ]
+            image = torch.cat(image_chunks, dim=0)
             image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
         else:
             image = latents

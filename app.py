@@ -54,7 +54,7 @@ def _shutdown_server():
 
 SHAPE_PRESETS_LIST = sorted(["mini", "mini-turbo", "2.0", "2.0-turbo", "2.1"])
 SHAPE_PRESETS_LIST_MV = sorted(["mv", "mv-turbo"])
-PAINT_PRESETS_LIST = sorted(["2.0", "2.0-turbo"])
+PAINT_PRESETS_LIST = sorted(["2.0", "2.0-turbo", "2.1"])
 
 _sd_pipeline = None
 _sd_pipeline_mode = None  # "text2img" or "img2img"
@@ -270,6 +270,7 @@ def _run_upscale(
 def _run_retexture(
     glb_path, image_paths_state, no_rembg, use_delight, paint_preset, paint_backend,
     paint_render_size, paint_texture_size, seed, randomize_seed,
+    paint_basic_texture=True,
     progress=gr.Progress(),
 ):
     if not glb_path:
@@ -299,6 +300,7 @@ def _run_retexture(
         paint_mlx_weights=None,
         paint_render_size=paint_render_size,
         paint_texture_size=paint_texture_size,
+        paint_basic_texture=paint_basic_texture,
     )
 
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-retexture")
@@ -339,6 +341,7 @@ def generate(
     volume_decoder="vanilla",
     left_image_path=None,
     back_image_path=None,
+    paint_basic_texture=True,
     run_dir=None,
     progress=gr.Progress(),
 ):
@@ -404,6 +407,7 @@ def generate(
         paint_mlx_weights=None,
         paint_render_size=paint_render_size,
         paint_texture_size=paint_texture_size,
+        paint_basic_texture=paint_basic_texture,
     )
 
     progress(0.05, desc="Generating 3D shape...")
@@ -542,10 +546,12 @@ def _simplify_mesh(mesh, target_faces):
 
 
 def _set_preset(name):
-    if name == "standard":
-        return 30, 256, 512, 512, True, False, 2000
-    else:
-        return 10, 96, 512, 512, True, True, 500
+    if name == "lowpoly":
+        return "2.0-turbo", "2.0-turbo", "vanilla", 10, 96, 512, 512, True, True, 500
+    elif name == "normal":
+        return "2.0-turbo", "2.0-turbo", "flashvdm", 20, 192, 512, 512
+    else:  # high
+        return "2.1", "2.1", "flashvdm", 30, 256, 1024, 1024
 
 
 def _on_volume_decoder_change(choice):
@@ -553,7 +559,7 @@ def _on_volume_decoder_change(choice):
     # reduction and aren't safe to feed into the higher-quality Upscale pass.
     enabled = choice != "flashvdm"
     update = gr.update(interactive=enabled)
-    return update, update, update, update, update
+    return update, update, update
 
 
 def _on_mv_images_change(left, back):
@@ -968,11 +974,11 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                             label="Volume Decoder",
                             info="FlashVDM is faster, but disables Polygon reduction and Upscale.",
                         )
-
                 with gr.Group(elem_classes="quiet-box"):
                     with gr.Row():
-                        btn_standard = gr.Button("Standard", size="sm")
                         btn_lowpoly = gr.Button("Lowpoly", size="sm")
+                        btn_normal = gr.Button("Normal", size="sm")
+                        btn_high = gr.Button("High", size="sm")
                     no_rembg = gr.Checkbox(
                         value=False,
                         label="Disable background removal",
@@ -1075,18 +1081,22 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                     )
                     upscale_btn = gr.Button("Upscale", variant="primary", size="lg")
 
-        btn_standard.click(
-            fn=lambda: _set_preset("standard"),
-            outputs=[shape_steps, shape_octree_resolution, paint_render_size, paint_texture_size, use_delight, simplify_before, target_faces],
-        )
         btn_lowpoly.click(
             fn=lambda: _set_preset("lowpoly"),
-            outputs=[shape_steps, shape_octree_resolution, paint_render_size, paint_texture_size, use_delight, simplify_before, target_faces],
+            outputs=[shape_preset, paint_preset, volume_decoder, shape_steps, shape_octree_resolution, paint_render_size, paint_texture_size, use_delight, simplify_before, target_faces],
+        )
+        btn_normal.click(
+            fn=lambda: _set_preset("normal"),
+            outputs=[shape_preset, paint_preset, volume_decoder, shape_steps, shape_octree_resolution, paint_render_size, paint_texture_size],
+        )
+        btn_high.click(
+            fn=lambda: _set_preset("high"),
+            outputs=[shape_preset, paint_preset, volume_decoder, shape_steps, shape_octree_resolution, paint_render_size, paint_texture_size],
         )
         volume_decoder.change(
             fn=_on_volume_decoder_change,
             inputs=[volume_decoder],
-            outputs=[simplify_before, target_faces, btn_standard, btn_lowpoly, upscale_btn],
+            outputs=[simplify_before, target_faces, upscale_btn],
         )
         left_image_input.change(
             fn=_on_mv_images_change,
@@ -1220,11 +1230,11 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                             label="Volume Decoder",
                             info="FlashVDM is faster, but disables Polygon reduction and Upscale.",
                         )
-
                 with gr.Group(elem_classes="quiet-box"):
                     with gr.Row():
-                        btn_standard_t2 = gr.Button("Standard", size="sm")
                         btn_lowpoly_t2 = gr.Button("Lowpoly", size="sm")
+                        btn_normal_t2 = gr.Button("Normal", size="sm")
+                        btn_high_t2 = gr.Button("High", size="sm")
                     no_rembg_t2 = gr.Checkbox(
                         value=False,
                         label="Disable background removal",
@@ -1332,7 +1342,8 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             sd_output_img, shape_preset, paint_preset, paint_backend,
             no_rembg, use_delight, seed, shape_steps, shape_octree_resolution,
             paint_render_size, paint_texture_size, simplify_before_texturing,
-            target_faces, skip_texturing=False, volume_decoder="vanilla", progress=gr.Progress()
+            target_faces, skip_texturing=False, volume_decoder="vanilla",
+            progress=gr.Progress()
         ):
             if sd_output_img is None:
                 raise gr.Error("Generate an image first!")
@@ -1416,18 +1427,22 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label)
 
-        btn_standard_t2.click(
-            fn=lambda: _set_preset("standard"),
-            outputs=[shape_steps_t2, shape_octree_resolution_t2, paint_render_size_t2, paint_texture_size_t2, use_delight_t2, simplify_before_t2, target_faces_t2],
-        )
         btn_lowpoly_t2.click(
             fn=lambda: _set_preset("lowpoly"),
-            outputs=[shape_steps_t2, shape_octree_resolution_t2, paint_render_size_t2, paint_texture_size_t2, use_delight_t2, simplify_before_t2, target_faces_t2],
+            outputs=[shape_preset_t2, paint_preset_t2, volume_decoder_t2, shape_steps_t2, shape_octree_resolution_t2, paint_render_size_t2, paint_texture_size_t2, use_delight_t2, simplify_before_t2, target_faces_t2],
+        )
+        btn_normal_t2.click(
+            fn=lambda: _set_preset("normal"),
+            outputs=[shape_preset_t2, paint_preset_t2, volume_decoder_t2, shape_steps_t2, shape_octree_resolution_t2, paint_render_size_t2, paint_texture_size_t2],
+        )
+        btn_high_t2.click(
+            fn=lambda: _set_preset("high"),
+            outputs=[shape_preset_t2, paint_preset_t2, volume_decoder_t2, shape_steps_t2, shape_octree_resolution_t2, paint_render_size_t2, paint_texture_size_t2],
         )
         volume_decoder_t2.change(
             fn=_on_volume_decoder_change,
             inputs=[volume_decoder_t2],
-            outputs=[simplify_before_t2, target_faces_t2, btn_standard_t2, btn_lowpoly_t2, upscale_btn_t2],
+            outputs=[simplify_before_t2, target_faces_t2, upscale_btn_t2],
         )
 
     demo.queue()
