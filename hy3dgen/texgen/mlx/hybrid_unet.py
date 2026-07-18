@@ -195,16 +195,19 @@ class HybridMLXUNet:
         class_labels = kwargs.get("class_labels", kwargs.get("camera_info_gen"))
         camera_info_ref = kwargs.get("camera_info_ref")
 
+        # Per-branch CFG scales pass through as mx.array [B] — e.g. the 2.1
+        # pipeline's ref_scale=[0,1,1], where branch 0 is the *unconditional*
+        # CFG branch with reference attention switched off. These must NOT be
+        # collapsed to a scalar: doing so (old behavior: take the last
+        # element) applied full conditioning to the unconditional branch too,
+        # making cond≈uncond so the CFG update guidance_scale*(cond-uncond)
+        # amplified quasi-random residual instead of a real guidance signal —
+        # measured on a real mesh as 3.2x more blue-artifact pixels and 24%
+        # more speckle vs guidance disabled. transformer_block.py's
+        # _broadcast_scale already expands [B] arrays to the flattened
+        # (b n_pbr n) batch exactly like the PyTorch reference does.
         mva_scale = self._scale_to_mlx(kwargs.get("mva_scale", 1.0))
         ref_scale = self._scale_to_mlx(kwargs.get("ref_scale", 1.0))
-
-        # 2.1 remote pipeline can pass per-branch CFG tensors like [0, 1].
-        # Our MLX path currently expects a single scalar scale for the flattened batch.
-        if self.profile == PROFILE_PAINT_PBR_21:
-            if hasattr(mva_scale, "shape") and len(mva_scale.shape) > 0:
-                mva_scale = float(np.array(mva_scale).reshape(-1)[-1])
-            if hasattr(ref_scale, "shape") and len(ref_scale.shape) > 0:
-                ref_scale = float(np.array(ref_scale).reshape(-1)[-1])
 
         sample_np = self._to_np(sample)
         enc_np = self._to_np(encoder_hidden_states)
