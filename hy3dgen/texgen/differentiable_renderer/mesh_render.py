@@ -800,11 +800,21 @@ class MeshRender():
 
         sketch_image = sketch_image.permute(2, 0, 1).unsqueeze(0)
         sketch_image = F.conv2d(sketch_image, kernel, padding=kernel_size // 2)
-        sketch_image = (sketch_image > 0).float()  # 二值化
+        # Soft taper instead of a hard cutoff: texels right on a depth/normal
+        # discontinuity (e.g. a nose ridge) get near-zero reliability, but
+        # texels toward the outer edge of the dilation kernel taper back
+        # toward full weight instead of the whole kernel_size-wide band being
+        # treated as uniformly unreliable. A hard binarization here made this
+        # view's weight drop to zero abruptly across the whole band, forcing
+        # the per-texel blend to lean entirely on a different (independently
+        # generated) view right at that edge — a visible hard seam with a
+        # lighting/color mismatch, worst on high-curvature features like a
+        # nose bridge.
+        sketch_image = 1.0 - torch.clamp(sketch_image / kernel_size, 0, 1)
         sketch_image = sketch_image.squeeze(0).permute(1, 2, 0)
-        visible_mask = visible_mask * (sketch_image < 0.5)
+        visible_mask = visible_mask * sketch_image
 
-        cos_image[visible_mask == 0] = 0
+        cos_image = cos_image * visible_mask
 
         method = self.bake_mode if method is None else method
 
