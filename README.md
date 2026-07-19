@@ -12,7 +12,7 @@ Full reference implementation of Hunyuan3D inference on native Apple Silicon, in
 
 Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
-<img width="1443" height="637" alt="Снимок экрана — 2026-07-16 в 23 43 14" src="https://github.com/user-attachments/assets/fb136e6f-0960-4515-b570-98356919be0c" />
+<img width="1427" height="474" alt="Снимок экрана — 2026-07-18 в 12 23 50" src="https://github.com/user-attachments/assets/444e3bb8-8ac1-4121-826f-34f0dd7c7fa9" />
 
 
 ---
