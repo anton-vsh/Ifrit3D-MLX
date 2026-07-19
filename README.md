@@ -1,6 +1,6 @@
 # Ifrit3D-MLX (mac Os only)
 
-Spiritual successor to Luma Genie (RIP). Now you can generate those «ugly» (but incredibly cozy) 3D models once again (texture-detail passes included). As a cherry on the cake, you can also generate robust lowpoly models and «normal» high poly aswell.
+Spiritual successor to Luma Genie (RIP). Now you can generate those «ugly» (but incredibly cozy) 3D models once again (texture-detail passes included), with shape generation running on a native Swift/MLX backend by default — roughly 4x faster than the PyTorch fallback. As a cherry on the cake, you can also generate robust lowpoly models and «normal» high poly aswell.
 
 <img width="1551" height="892" alt="Снимок экрана — 2026-07-16 в 13 48 36" src="https://github.com/user-attachments/assets/e8829d46-c764-40a5-bbe5-abf3171621a9" />
 
@@ -14,6 +14,17 @@ Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
 <img width="1427" height="474" alt="Снимок экрана — 2026-07-18 в 12 23 50" src="https://github.com/user-attachments/assets/444e3bb8-8ac1-4121-826f-34f0dd7c7fa9" />
 
+
+---
+
+## Latest release: [v0.2.0](../../releases/tag/v0.2.0)
+
+- **Shape generation now defaults to a native Swift/MLX backend** — ~28s per mesh, ~4x faster than the PyTorch fallback it still uses automatically if Swift isn't built locally.
+- **New Texture Detail passes** — optional ESRGAN sharpen + SD Turbo touch-up before baking.
+- **New presets** — Lowpoly / Draft / Normal / High, with reduction targets calibrated from measured face counts.
+- Several correctness fixes: duplicate background-removal loading, a stale reference-image cache leaking content between generations, and asymmetric eye color/shape from a blend-weighting bug.
+
+See the [full release notes](../../releases/tag/v0.2.0) for details.
 
 ---
 
