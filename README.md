@@ -65,7 +65,7 @@ This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/Zimeng
 
 This project builds upon the work of:
 
-- [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX)
+- [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX) — the original CLI this project forked from, and also the source of the vendored Swift/MLX shape backend (their newer Swift `main` branch — see [`swift/README.md`](swift/README.md))
 - [Tencent Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2)
 - [TRELLIS](https://github.com/microsoft/TRELLIS) (Lane et al., 2024)
 - [pedronaugusto](https://github.com/pedronaugusto) — MLX implementation and related contributions
