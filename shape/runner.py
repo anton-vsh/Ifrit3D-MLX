@@ -112,9 +112,9 @@ def load_pil_images(paths: List[Path], use_rembg: bool) -> List[Any]:
 
     remover = None
     if use_rembg:
-        from hy3dgen.rembg import BackgroundRemover
+        from hy3dgen.rembg import get_background_remover
 
-        remover = BackgroundRemover()
+        remover = get_background_remover()
 
     out: List[Any] = []
     for p in paths:
@@ -164,8 +164,9 @@ _SHAPE_CACHE_PIPELINE = None
 _SHAPE_CACHE_LOCK = threading.Lock()
 
 
-def get_or_load_shape_pipeline(model_repo, subfolder, variant, use_safetensors, device):
+def get_or_load_shape_pipeline(model_repo, subfolder, variant, use_safetensors, device, progress_callback=None):
     from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+    from hf_progress import report_hf_downloads
 
     global _SHAPE_CACHE_KEY, _SHAPE_CACHE_PIPELINE
 
@@ -190,7 +191,8 @@ def get_or_load_shape_pipeline(model_repo, subfolder, variant, use_safetensors, 
             if variant:
                 load_kwargs["variant"] = variant
 
-            _SHAPE_CACHE_PIPELINE = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(**load_kwargs)
+            with report_hf_downloads(progress_callback, f"Downloading shape model {model_repo}/{subfolder} (first run only)"):
+                _SHAPE_CACHE_PIPELINE = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(**load_kwargs)
             _SHAPE_CACHE_KEY = key
 
         pipeline = _SHAPE_CACHE_PIPELINE
@@ -207,7 +209,9 @@ def get_or_load_shape_pipeline(model_repo, subfolder, variant, use_safetensors, 
 
 
 def _filter_mesh_fragments(mesh, min_faces=None):
-    import trimesh
+    import numpy as np
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
 
     if min_faces is None:
         min_faces = int(os.environ.get('HY3D_FRAGMENT_MIN_FACES', '20'))
@@ -216,21 +220,72 @@ def _filter_mesh_fragments(mesh, min_faces=None):
     if total_faces == 0:
         return mesh
 
-    components = mesh.split(only_watertight=False)
-    if len(components) <= 1:
+    # scipy csgraph instead of trimesh.split(): split() takes minutes on
+    # exactly the dust-fragmented meshes this filter exists to clean
+    # (observed: 20K+ components on an ambiguous white-on-white input).
+    adj = mesh.face_adjacency
+    if len(adj) == 0:
+        return mesh
+    graph = coo_matrix(
+        (np.ones(len(adj)), (adj[:, 0], adj[:, 1])),
+        shape=(total_faces, total_faces),
+    )
+    ncomp, labels = connected_components(graph, directed=False)
+    if ncomp <= 1:
         return mesh
 
+    counts = np.bincount(labels)
     threshold = max(min_faces, int(total_faces * 0.001))
-    kept = [c for c in components if len(c.faces) >= threshold]
-    if not kept:
+    keep_comp = counts >= threshold
+    if not keep_comp.any():
         return mesh
 
-    print(f"[shape] fragment filter: kept {len(kept)}/{len(components)} components "
-          f"(threshold={threshold} faces)")
-    return trimesh.util.concatenate(kept)
+    face_mask = keep_comp[labels]
+    print(f"[shape] fragment filter: kept {int(keep_comp.sum())}/{ncomp} components "
+          f"({int(face_mask.sum())}/{total_faces} faces, threshold={threshold})")
+    return mesh.submesh([np.nonzero(face_mask)[0]], append=True)
 
 
 def run_shape_pipeline(image_paths: List[Path], mode: str, args, forced_preset: Optional[str] = None, progress_callback=None):
+    if getattr(args, "shape_backend", "pytorch") == "swift":
+        effective_preset = forced_preset or getattr(args, "shape_preset", None)
+        if mode != "sv":
+            raise SystemExit("Swift shape backend does not support multi-view input.")
+        if effective_preset != "2.0-turbo":
+            raise SystemExit("Swift shape backend only supports the 2.0-turbo preset.")
+
+        import tempfile
+        from shape.swift_runner import run_swift_shape, SWIFT_SHAPE_STEPS
+
+        if args.shape_steps != SWIFT_SHAPE_STEPS:
+            print(
+                f"[shape] swift backend ignores --shape-steps={args.shape_steps}: "
+                f"this checkpoint is consistency-distilled for exactly {SWIFT_SHAPE_STEPS} steps "
+                f"(more steps degrades output — verified: 566 mesh fragments at 30 steps vs. 27 at 8)."
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # The binary does its own conditioning-image prep but no background
+            # removal — feeding it a raw photo makes the model reconstruct the
+            # background as geometry (planes behind/under the subject). Run the
+            # same rembg preprocessing the PyTorch path gets and hand the Swift
+            # binary the RGBA cutout instead.
+            input_path = image_paths[0]
+            if not args.no_rembg:
+                cutout = load_pil_images([input_path], use_rembg=True)[0]
+                input_path = Path(tmpdir) / "input_rgba.png"
+                cutout.save(input_path)
+
+            out_glb = Path(tmpdir) / "swift_shape.glb"
+            mesh = run_swift_shape(
+                input_path,
+                out_glb_path=out_glb,
+                octree_resolution=args.shape_octree_resolution,
+                seed=args.seed,
+                progress_callback=progress_callback,
+            )
+            return _filter_mesh_fragments(mesh)
+
     import torch
 
     device = pick_device()
@@ -244,6 +299,7 @@ def run_shape_pipeline(image_paths: List[Path], mode: str, args, forced_preset: 
 
     pipeline = get_or_load_shape_pipeline(
         model_repo, subfolder, args.shape_variant, not args.no_shape_safetensors, device,
+        progress_callback=progress_callback,
     )
 
     gen = torch.manual_seed(args.seed)
@@ -273,8 +329,11 @@ def run_shape_pipeline(image_paths: List[Path], mode: str, args, forced_preset: 
     print(f"shape_model={model_repo}/{subfolder}")
     print(f"shape_time={time.time() - t0:.1f}s")
 
-    if os.environ.get('HY3D_USE_FLASHVDM', '0') == '1':
-        mesh = _filter_mesh_fragments(mesh)
+    # Not just a FlashVDM problem: any decoder produces iso-surface noise
+    # dust when the SDF is ambiguous (e.g. a white object on a white
+    # background) — verified 20K+ micro-fragments from the vanilla decoder,
+    # which then bake into speckle artifacts in the texture atlas.
+    mesh = _filter_mesh_fragments(mesh)
 
     return mesh
 
@@ -316,6 +375,8 @@ def build_shape_parser(description: str = "Run shape generation") -> argparse.Ar
     p.add_argument("--shape-steps", type=int, default=30)
     p.add_argument("--shape-octree-resolution", type=int, default=256)
     p.add_argument("--shape-num-chunks", type=int, default=12000)
+    p.add_argument("--shape-backend", choices=["pytorch", "swift"], default="pytorch",
+                    help="swift uses the native MLX-Swift hy3d binary (2.0-turbo preset only, single-image only)")
 
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--output", help="Output mesh path")

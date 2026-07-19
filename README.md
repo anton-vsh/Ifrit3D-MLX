@@ -1,6 +1,6 @@
 # Ifrit3D-MLX (mac Os only)
 
-Spiritual successor to Luma Genie (RIP). Now you can generate whose «ugly» (but incredibly cozy) 3D models once again (upscale option included). As a cherry on the cake, you can also generate robust lowpoly models and «normal» high poly aswell.
+Spiritual successor to Luma Genie (RIP). Now you can generate those «ugly» (but incredibly cozy) 3D models once again (texture-detail passes included). As a cherry on the cake, you can also generate robust lowpoly models and «normal» high poly aswell.
 
 <img width="1551" height="892" alt="Снимок экрана — 2026-07-16 в 13 48 36" src="https://github.com/user-attachments/assets/e8829d46-c764-40a5-bbe5-abf3171621a9" />
 
@@ -29,7 +29,9 @@ This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/Zimeng
 - **FlashVDM volume decoder** — an optional faster decode path, with fragment filtering to clean up the mesh artifacts it can introduce.
 - **Multi-view shape input** — reconstruct from front + left + back images instead of a single photo, for shape models that support it.
 - **Re-texture with seed** — re-run just the texturing pass on an existing mesh with a new (or fixed) seed, without regenerating the shape.
-- **Upscale** — regenerate a result at higher resolution/step counts, with optional SD-based input image refinement first.
+- **Swift/MLX shape backend** — shape generation defaults to a native Swift binary (~4x faster than PyTorch at the same settings), falling back to PyTorch automatically if not built locally.
+- **Texture Detail passes** — optional ESRGAN sharpen and SD Turbo generative touch-up passes, applied before baking.
+- **Lowpoly / Draft / Normal / High presets** — one-click geometry + texture-detail combinations, calibrated from measured face counts rather than arbitrary numbers.
 - **Granular progress reporting** — per-diffusion-step progress in the UI instead of a single stalled bar for the whole shape or texture pass.
 
 ---
@@ -93,6 +95,8 @@ This project also includes or depends on the following third-party software:
 | PyMeshLab | MIT |
 | VCGLib | BSD-2-Clause |
 | xatlas | MIT |
+| mlx-swift | MIT |
+| swift-numerics | Apache 2.0 |
 | mtldiffrast | See `libraries/mtldiffrast/LICENSE.txt` |
 | mtlbvh | See `libraries/mtlbvh/LICENSE.txt` |
 | mtlmesh | See `libraries/mtlmesh/LICENSE` |

@@ -52,9 +52,19 @@ def _shutdown_server():
     return "[STOPPED] Shutting down..."
 
 
-SHAPE_PRESETS_LIST = sorted(["mini", "mini-turbo", "2.0", "2.0-turbo", "2.1"])
-SHAPE_PRESETS_LIST_MV = sorted(["mv", "mv-turbo"])
-PAINT_PRESETS_LIST = sorted(["2.0", "2.0-turbo", "2.1"])
+# Single-model app: 2.0-turbo for both shape and paint (2.1 dropped — slower,
+# and it lost every same-input quality comparison run on 2026-07-18).
+# Shape defaults to the Swift MLX binary when the local build is present
+# (swift/bin is gitignored — fresh clones and the DMG fall back to pytorch).
+def _default_shape_backend():
+    try:
+        from shape.swift_runner import swift_shape_available
+        return "swift" if swift_shape_available() else "pytorch"
+    except Exception:
+        return "pytorch"
+
+
+SHAPE_BACKEND_DEFAULT = _default_shape_backend()
 
 _sd_pipeline = None
 _sd_pipeline_mode = None  # "text2img" or "img2img"
@@ -155,122 +165,10 @@ def _free_mps():
     print("[app] MPS cache cleared")
 
 
-def _upscale_image_sd(image, prompt="", progress=gr.Progress()):
-    import torch
-    from PIL import Image
-
-    progress(0, desc="Loading SD Turbo for upscale...")
-    pipe = _load_sd_pipeline()
-
-    if isinstance(image, str):
-        image = Image.open(image)
-    image = image.resize((768, 768), Image.LANCZOS)
-
-    progress(0.3, desc="SD upscaling (strength=0.5)...")
-    start = time.time()
-    with _sd_lock, torch.inference_mode():
-        result = pipe(
-            prompt=prompt,
-            image=image,
-            strength=0.5,
-            height=768,
-            width=768,
-            num_inference_steps=8,
-            guidance_scale=0.0,
-        ).images[0]
-    print(f"[app] SD upscale done in {time.time() - start:.1f}s")
-
-    progress(0.8, desc="Freeing GPU memory...")
-    _unload_sd_pipeline()
-    return result
-
-
-def _run_upscale(
-    input_image_path, use_delight, no_rembg, use_sd_upscale,
-    seed, shape_steps, shape_octree_resolution,
-    paint_render_size, paint_texture_size,
-    sd_upscale_prompt="", skip_texturing=False,
-    progress=gr.Progress(),
-):
-    _free_mps()
-
-    from PIL import Image
-    from shape.runner import run_shape_pipeline as run_shape
-    from main import run_paint_pipeline as run_paint
-
-    progress(0, desc="Upscaling input image...")
-    if use_sd_upscale:
-        img = _upscale_image_sd(input_image_path, sd_upscale_prompt, _scaled_progress(progress, 0, 0.15))
-    else:
-        img = Image.open(input_image_path)
-
-    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-upscale")
-    run_dir = OUTPUT_DIR / ts
-    run_dir.mkdir(parents=True, exist_ok=True)
-    img_path = run_dir / "input.png"
-    img.save(img_path, "PNG")
-
-    os.environ['HY3D_USE_DELIGHT'] = '1' if use_delight else '0'
-    # Upscale always uses the vanilla volume decoder — FlashVDM's fragmented
-    # output isn't reliable for the higher-quality regeneration Upscale does.
-    os.environ['HY3D_USE_FLASHVDM'] = '0'
-
-    args = Namespace(
-        shape_preset="2.0-turbo",
-        shape_model_repo=None,
-        shape_subfolder=None,
-        shape_variant="fp16",
-        no_shape_safetensors=False,
-        shape_steps=shape_steps,
-        shape_octree_resolution=shape_octree_resolution,
-        shape_num_chunks=12000,
-        no_rembg=no_rembg,
-        seed=seed,
-        paint_preset="2.0-turbo",
-        paint_model_repo=None,
-        paint_subfolder=None,
-        paint_diffusion_backend="mlx",
-        paint_mlx_weights=None,
-        paint_render_size=paint_render_size,
-        paint_texture_size=paint_texture_size,
-    )
-
-    progress(0.15, desc="Generating 3D shape (high quality)...")
-    print(f"[app] upscale params: steps={shape_steps}, octree={shape_octree_resolution}, seed={seed}")
-    mesh = run_shape(
-        [img_path], "sv", args, forced_preset="2.0-turbo",
-        progress_callback=_scaled_progress(progress, 0.15, 0.55),
-    )
-    print(f"[app] upscale shape done (faces={len(mesh.faces)})")
-
-    if skip_texturing:
-        glb_path = run_dir / "result.glb"
-        mesh.export(glb_path)
-        progress(0.9, desc="Exporting OBJ...")
-        obj_zip = _export_obj_zip(mesh, run_dir)
-        progress(1.0, desc="Done!")
-        _free_mps()
-        return str(glb_path), str(glb_path), obj_zip, str(glb_path)
-
-    progress(0.55, desc="Texturing (high quality)...")
-    textured = run_paint(mesh, [img_path], args, progress_callback=_scaled_progress(progress, 0.55, 0.9))
-    print("[app] upscale paint done")
-
-    glb_path = run_dir / "result.glb"
-    textured.export(glb_path)
-
-    progress(0.9, desc="Exporting OBJ...")
-    obj_zip = _export_obj_zip(textured, run_dir)
-
-    progress(1.0, desc="Done!")
-    _free_mps()
-    return str(glb_path), str(glb_path), obj_zip, str(glb_path)
-
-
 def _run_retexture(
-    glb_path, image_paths_state, no_rembg, use_delight, paint_preset, paint_backend,
-    paint_render_size, paint_texture_size, seed, randomize_seed,
-    paint_basic_texture=True,
+    glb_path, image_paths_state, use_delight,
+    seed, randomize_seed,
+    texture_sd_detail=False, texture_esrgan_sharpen=False,
     progress=gr.Progress(),
 ):
     if not glb_path:
@@ -287,20 +185,20 @@ def _run_retexture(
     mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
 
     os.environ['HY3D_USE_DELIGHT'] = '1' if use_delight else '0'
+    os.environ['HY3D_USE_SD_UPSCALE'] = '1' if texture_sd_detail else '0'
+    os.environ['HY3D_USE_ESRGAN_UPSCALE'] = '1' if texture_esrgan_sharpen else '0'
 
     resolved_seed = random.randint(0, 999999) if randomize_seed else seed
 
     args = Namespace(
-        no_rembg=no_rembg,
+        no_rembg=False,
         seed=resolved_seed,
-        paint_preset=paint_preset,
+        paint_preset="2.0-turbo",
         paint_model_repo=None,
         paint_subfolder=None,
-        paint_diffusion_backend=paint_backend,
+        paint_diffusion_backend="mlx",
         paint_mlx_weights=None,
-        paint_render_size=paint_render_size,
-        paint_texture_size=paint_texture_size,
-        paint_basic_texture=paint_basic_texture,
+        paint_basic_texture=True,
     )
 
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-retexture")
@@ -325,23 +223,16 @@ def _run_retexture(
 
 def generate(
     image_path,
-    shape_preset,
-    paint_preset,
-    paint_backend,
-    no_rembg,
     use_delight,
     seed,
     shape_steps,
     shape_octree_resolution,
-    paint_render_size,
-    paint_texture_size,
     simplify_before_texturing,
     target_faces,
     skip_texturing=False,
-    volume_decoder="vanilla",
-    left_image_path=None,
-    back_image_path=None,
-    paint_basic_texture=True,
+    texture_sd_detail=False,
+    texture_esrgan_sharpen=False,
+    shape_backend=SHAPE_BACKEND_DEFAULT,
     run_dir=None,
     progress=gr.Progress(),
 ):
@@ -352,11 +243,6 @@ def generate(
     from shape.runner import run_shape_pipeline as run_shape
     from main import run_paint_pipeline as run_paint
 
-    if bool(left_image_path) != bool(back_image_path):
-        raise gr.Error("Multi-view needs both Left and Back images, or neither.")
-    if left_image_path and back_image_path and shape_preset not in SHAPE_PRESETS_LIST_MV:
-        raise gr.Error(f"Multi-view input requires a multi-view Shape Model ({', '.join(SHAPE_PRESETS_LIST_MV)}).")
-
     progress(0, desc="Preparing...")
 
     if use_delight:
@@ -364,7 +250,9 @@ def generate(
     else:
         os.environ.pop('HY3D_USE_DELIGHT', None)
 
-    os.environ['HY3D_USE_FLASHVDM'] = '1' if volume_decoder == 'flashvdm' else '0'
+    os.environ['HY3D_USE_FLASHVDM'] = '0'
+    os.environ['HY3D_USE_SD_UPSCALE'] = '1' if texture_sd_detail else '0'
+    os.environ['HY3D_USE_ESRGAN_UPSCALE'] = '1' if texture_esrgan_sharpen else '0'
 
     img = Image.open(image_path)
     if run_dir is None:
@@ -374,46 +262,35 @@ def generate(
     img_path = run_dir / "input.png"
     img.save(img_path, "PNG")
 
-    if left_image_path and back_image_path:
-        left_path = run_dir / "input_left.png"
-        back_path = run_dir / "input_back.png"
-        Image.open(left_image_path).save(left_path, "PNG")
-        Image.open(back_image_path).save(back_path, "PNG")
-        image_paths = [img_path, left_path, back_path]
-        mode = "mv"
-    else:
-        image_paths = [img_path]
-        mode = "sv"
+    image_paths = [img_path]
+    mode = "sv"
 
     _last_original_inputs = image_paths
 
     args = Namespace(
-        shape_preset=shape_preset,
+        shape_preset="2.0-turbo",
         shape_model_repo=None,
         shape_subfolder=None,
         shape_variant="fp16",
-        # tencent/Hunyuan3D-2.1's hunyuan3d-dit-v2-1 subfolder only ships
-        # model.fp16.ckpt, not model.fp16.safetensors like every other preset.
-        no_shape_safetensors=(shape_preset == "2.1"),
+        no_shape_safetensors=False,
         shape_steps=shape_steps,
         shape_octree_resolution=shape_octree_resolution,
         shape_num_chunks=12000,
-        no_rembg=no_rembg,
+        shape_backend=shape_backend,
+        no_rembg=False,
         seed=seed,
-        paint_preset=paint_preset,
+        paint_preset="2.0-turbo",
         paint_model_repo=None,
         paint_subfolder=None,
-        paint_diffusion_backend=paint_backend,
+        paint_diffusion_backend="mlx",
         paint_mlx_weights=None,
-        paint_render_size=paint_render_size,
-        paint_texture_size=paint_texture_size,
-        paint_basic_texture=paint_basic_texture,
+        paint_basic_texture=True,
     )
 
     progress(0.05, desc="Generating 3D shape...")
     start = time.time()
     mesh = run_shape(
-        image_paths, mode, args, forced_preset=shape_preset,
+        image_paths, mode, args, forced_preset="2.0-turbo",
         progress_callback=_scaled_progress(progress, 0.05, 0.40),
     )
     print(f"[app] shape done in {time.time() - start:.1f}s")
@@ -545,27 +422,28 @@ def _simplify_mesh(mesh, target_faces):
     return _unweld_uvs(result)
 
 
+# Presets differ in geometry detail, reduction target, and texture-detail
+# passes — the model (2.0-turbo) and steps (8, its distillation schedule)
+# are fixed. Delight and skip-texturing are off for every preset now.
+# target_faces for normal/high are calibrated from measured raw (post
+# fragment-filter, pre-simplification) face counts at each octree resolution
+# (96->61,172, 192->245,356, 256->436,076 on the same test input) — both
+# targets keep the same ~41% retention ratio, so "high" carries proportionally
+# more absolute detail than "normal" rather than an arbitrary round number.
+# Returns: shape_steps, shape_octree_resolution, use_delight, simplify_before,
+# target_faces, skip_texturing, texture_sd_detail, texture_esrgan_sharpen
 def _set_preset(name):
     if name == "lowpoly":
-        return "2.0-turbo", "2.0-turbo", "vanilla", 10, 96, 512, 512, True, True, 500
+        return 8, 96, False, True, 500, False, False, False
+    elif name == "draft":
+        # Same geometry as lowpoly, but unreduced — for inspecting the raw
+        # shape output before deciding on a reduction target.
+        return 8, 96, False, False, 500, False, False, False
     elif name == "normal":
-        return "2.0-turbo", "2.0-turbo", "flashvdm", 20, 192, 512, 512
+        return 8, 192, False, True, 100000, False, True, False
     else:  # high
-        return "2.1", "2.1", "flashvdm", 30, 256, 1024, 1024
+        return 8, 256, False, True, 180000, False, True, True
 
-
-def _on_volume_decoder_change(choice):
-    # FlashVDM currently produces fragmented meshes that break polygon
-    # reduction and aren't safe to feed into the higher-quality Upscale pass.
-    enabled = choice != "flashvdm"
-    update = gr.update(interactive=enabled)
-    return update, update, update
-
-
-def _on_mv_images_change(left, back):
-    if left and back:
-        return gr.update(choices=SHAPE_PRESETS_LIST_MV, value="mv-turbo")
-    return gr.update(choices=SHAPE_PRESETS_LIST, value="2.0-turbo")
 
 
 def _simplify_current(glb_path, target_faces, progress=gr.Progress()):
@@ -743,11 +621,28 @@ button {
     font-weight: 700 !important;
 }
 
+.brutal-box,
+.brutal-box .styler,
+.brutal-box .form {
+    background: transparent !important;
+}
 .brutal-box {
     border: 2px solid #000000 !important;
     border-radius: 0 !important;
     padding: 0.75rem !important;
     margin-bottom: 0.75rem !important;
+}
+
+/* Keep all 4 preset buttons on one line instead of wrapping to a second
+   row — Gradio's default Row wraps when buttons' natural min-width doesn't
+   fit four across a narrow column. */
+.preset-row {
+    flex-wrap: nowrap !important;
+}
+.preset-row button {
+    min-width: 0 !important;
+    padding: 0.5rem 0.3rem !important;
+    font-size: 0.85em !important;
 }
 
 .quiet-box,
@@ -762,6 +657,34 @@ button {
        margin on top of that stacked redundantly and made gaps between
        groups noticeably bigger than gaps between rows within a group. */
     margin-bottom: 0 !important;
+}
+
+/* Combined with .quiet-box (elem_classes=["quiet-box", "thin-box"]) on the
+   Shape/Texture setting groups: inherits all of quiet-box's per-control
+   normalization (Number/Slider/button/dropdown styling below) but restores
+   a single outer border — placed after quiet-box's own `border: none
+   !important` above so this wins the cascade despite equal specificity
+   (both single-class selectors). A standalone .thin-box class (without also
+   using quiet-box's nested-control rules) would leave inputs like Seed at
+   Gradio's raw default size/border, which reads as a second nested box. */
+.thin-box {
+    border: 1px solid #000000 !important;
+    border-radius: 0 !important;
+    padding: 0.75rem !important;
+    /* The parent Column already applies a 28px flex `gap` between top-level
+       children (see quiet-box's own comment above) — stacking our own
+       margin-bottom on top of that made the gap between the Shape and
+       Texture boxes noticeably bigger than intended. */
+    margin-bottom: 0 !important;
+}
+/* A single gr.Group(elem_classes=[..., "thin-box"]) renders as TWO nested
+   divs that both receive the class (an outer wrapper + an inner .gr-group),
+   so the border above was drawn twice — a box inside a box. Neutralize the
+   inner one entirely so only the outermost draws the single border. */
+.thin-box .thin-box {
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
 }
 /* Buttons inside a bordered-less Group lose their own border too (Gradio
    merges grouped elements to look seamless with the group's outer border) —
@@ -872,6 +795,26 @@ button {
     padding-left: 1rem !important;
 }
 
+/* .thin-box groups (Shape / Texture) carry their own 1px outer border, so
+   the per-row divider lines that .quiet-box draws between controls become a
+   redundant second set of inner borders. Strip every internal divider
+   (horizontal row lines + vertical column lines) inside a .thin-box so it
+   reads as one clean bordered box, keeping only the divider spacing so
+   controls don't jam together. */
+.thin-box .row:not(:has(button)),
+.thin-box > .styler > .form > .block,
+.thin-box .row .form > .block {
+    border-bottom: none !important;
+    border-right: none !important;
+}
+
+/* Extra breathing room between "Randomize seed" and the Re-texture button
+   right below it — they otherwise sit at the same tight spacing as every
+   other control row. */
+#retexture-btn, #retexture-btn-t2 {
+    margin-top: 1rem !important;
+}
+
 .label-wrap, .accordion .label-wrap span {
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -942,57 +885,15 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                     label="Input Image",
                     height=300,
                 )
-                with gr.Accordion("Multi-view (optional)", open=False):
-                    gr.Markdown("Add Left + Back to use multi-view shape reconstruction (requires an mv Shape Model).")
-                    with gr.Row():
-                        left_image_input = gr.Image(type="filepath", label="Left")
-                        back_image_input = gr.Image(type="filepath", label="Back")
                 generate_btn = gr.Button("Generate", variant="primary", size="lg")
 
-                with gr.Group(elem_classes="quiet-box"):
-                    with gr.Row():
-                        shape_preset = gr.Dropdown(
-                            choices=SHAPE_PRESETS_LIST,
-                            value="2.0-turbo",
-                            label="Shape Model",
-                        )
-                        paint_preset = gr.Dropdown(
-                            choices=PAINT_PRESETS_LIST,
-                            value="2.0-turbo",
-                            label="Paint Model",
-                        )
-                    with gr.Row():
-                        paint_backend = gr.Radio(
-                            choices=["mlx", "pytorch"],
-                            value="mlx",
-                            label="Paint Backend",
-                            info="MLX is faster on Apple Silicon",
-                        )
-                        volume_decoder = gr.Radio(
-                            choices=["vanilla", "flashvdm"],
-                            value="vanilla",
-                            label="Volume Decoder",
-                            info="FlashVDM is faster, but disables Polygon reduction and Upscale.",
-                        )
-                with gr.Group(elem_classes="quiet-box"):
-                    with gr.Row():
-                        btn_lowpoly = gr.Button("Lowpoly", size="sm")
-                        btn_normal = gr.Button("Normal", size="sm")
-                        btn_high = gr.Button("High", size="sm")
-                    no_rembg = gr.Checkbox(
-                        value=False,
-                        label="Disable background removal",
-                    )
-                    use_delight = gr.Checkbox(
-                        value=True,
-                        label="Remove lighting (Delight)",
-                        info="Pre-processes the input image to remove lighting before texturing, producing more neutral textures",
-                    )
-                    skip_texturing = gr.Checkbox(
-                        value=False,
-                        label="Skip texturing (shape only)",
-                        info="Generate the 3D shape mesh without texturing — useful for testing or external texturing",
-                    )
+                with gr.Row(elem_classes="preset-row"):
+                    btn_lowpoly = gr.Button("Lowpoly", size="sm")
+                    btn_draft = gr.Button("Draft", size="sm")
+                    btn_normal = gr.Button("Normal", size="sm")
+                    btn_high = gr.Button("High", size="sm")
+
+                with gr.Group(elem_classes=["quiet-box", "thin-box"]):
                     seed = gr.Number(
                         value=12345,
                         label="Seed",
@@ -1001,24 +902,29 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                         maximum=999999,
                     )
                     simplify_before = gr.Checkbox(
-                        value=False,
+                        value=True,
                         label="Simplify mesh before texturing",
                         info="Simplifies the shape mesh before the texturing pass, so UVs are generated for the low-poly geometry",
                         elem_id="simplify-checkbox",
                     )
                     target_faces = gr.Slider(
                         minimum=100,
-                        maximum=10000,
-                        value=2000,
+                        maximum=200000,
+                        value=100000,
                         step=100,
                         label="Target faces",
                     )
                     shape_steps = gr.Slider(
                         minimum=1,
                         maximum=100,
-                        value=30,
+                        value=8,
                         step=1,
                         label="Shape Steps",
+                        interactive=(SHAPE_BACKEND_DEFAULT != "swift"),
+                        info=(
+                            "Ignored for Swift — fixed at 8 steps (consistency-distilled checkpoint)"
+                            if SHAPE_BACKEND_DEFAULT == "swift" else None
+                        ),
                     )
                     shape_octree_resolution = gr.Slider(
                         minimum=32,
@@ -1027,154 +933,85 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                         step=32,
                         label="Octree Resolution",
                     )
-                    paint_render_size = gr.Slider(
-                        minimum=32,
-                        maximum=1024,
-                        value=1024,
-                        step=32,
-                        label="Render Size",
+
+                with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+                    use_delight = gr.Checkbox(
+                        value=False,
+                        label="Remove lighting (Delight)",
+                        info="Pre-processes the input image to remove lighting before texturing, producing more neutral textures",
                     )
-                    paint_texture_size = gr.Slider(
-                        minimum=32,
-                        maximum=1024,
-                        value=1024,
-                        step=32,
-                        label="Texture Size",
+                    skip_texturing = gr.Checkbox(
+                        value=False,
+                        label="Skip texturing (shape only)",
+                        info="Generate the 3D shape mesh without texturing — useful for testing or external texturing",
                     )
+                    texture_sd_detail = gr.Checkbox(
+                        value=False,
+                        label="SD Turbo detail pass",
+                        info="Light generative touch-up on each view before baking",
+                    )
+                    texture_esrgan_sharpen = gr.Checkbox(
+                        value=False,
+                        label="ESRGAN sharpen pass",
+                        info="Cheap upscale/downsample cleanup, runs after SD Turbo",
+                    )
+                    randomize_seed = gr.Checkbox(value=True, label="Randomize seed")
+                    retexture_btn = gr.Button("Re-texture", variant="primary", size="lg", elem_id="retexture-btn")
 
             with gr.Column(scale=1):
                 current_mesh = gr.State()
                 output_3d = gr.Model3D(label="Result", height=600, elem_id="output-viewer-1")
                 output_file = gr.File(label="Download .glb")
                 output_obj = gr.File(label="Download .obj (zipped)")
-                retexture_btn = gr.Button("Re-texture", variant="primary", size="lg")
-                with gr.Group(elem_classes="quiet-box"):
-                    randomize_seed = gr.Checkbox(value=True, label="Randomize seed")
-                with gr.Accordion("Upscale (optional)", open=False, elem_classes="brutal-box"):
-                    with gr.Row():
-                        upscale_shp_steps = gr.Slider(
-                            minimum=10, maximum=100, value=50, step=1,
-                            label="Shape Steps",
-                        )
-                        upscale_octree = gr.Slider(
-                            minimum=64, maximum=512, value=512, step=32,
-                            label="Octree Resolution",
-                        )
-                    with gr.Row():
-                        upscale_render = gr.Slider(
-                            minimum=64, maximum=1024, value=1024, step=32,
-                            label="Render Size",
-                        )
-                        upscale_tex = gr.Slider(
-                            minimum=64, maximum=1024, value=1024, step=32,
-                            label="Texture Size",
-                        )
-                    use_sd_upscale = gr.Checkbox(
-                        value=True,
-                        label="SD upscale input image",
-                        info="Refines the input image with SD Turbo before regenerating",
-                    )
-                    sd_upscale_prompt = gr.Textbox(
-                        label="SD Upscale Prompt",
-                        placeholder="Describe what the upscaled image should look like...",
-                        value="highly detailed, sharp",
-                    )
-                    upscale_btn = gr.Button("Upscale", variant="primary", size="lg")
 
-        btn_lowpoly.click(
-            fn=lambda: _set_preset("lowpoly"),
-            outputs=[shape_preset, paint_preset, volume_decoder, shape_steps, shape_octree_resolution, paint_render_size, paint_texture_size, use_delight, simplify_before, target_faces],
-        )
-        btn_normal.click(
-            fn=lambda: _set_preset("normal"),
-            outputs=[shape_preset, paint_preset, volume_decoder, shape_steps, shape_octree_resolution, paint_render_size, paint_texture_size],
-        )
-        btn_high.click(
-            fn=lambda: _set_preset("high"),
-            outputs=[shape_preset, paint_preset, volume_decoder, shape_steps, shape_octree_resolution, paint_render_size, paint_texture_size],
-        )
-        volume_decoder.change(
-            fn=_on_volume_decoder_change,
-            inputs=[volume_decoder],
-            outputs=[simplify_before, target_faces, upscale_btn],
-        )
-        left_image_input.change(
-            fn=_on_mv_images_change,
-            inputs=[left_image_input, back_image_input],
-            outputs=[shape_preset],
-        )
-        back_image_input.change(
-            fn=_on_mv_images_change,
-            inputs=[left_image_input, back_image_input],
-            outputs=[shape_preset],
-        )
+        _preset_outputs = [
+            shape_steps, shape_octree_resolution, use_delight, simplify_before,
+            target_faces, skip_texturing, texture_sd_detail, texture_esrgan_sharpen,
+        ]
+        btn_lowpoly.click(fn=lambda: _set_preset("lowpoly"), outputs=_preset_outputs)
+        btn_draft.click(fn=lambda: _set_preset("draft"), outputs=_preset_outputs)
+        btn_normal.click(fn=lambda: _set_preset("normal"), outputs=_preset_outputs)
+        btn_high.click(fn=lambda: _set_preset("high"), outputs=_preset_outputs)
+
         generate_btn.click(
             fn=generate,
             inputs=[
                 image_input,
-                shape_preset,
-                paint_preset,
-                paint_backend,
-                no_rembg,
                 use_delight,
                 seed,
                 shape_steps,
                 shape_octree_resolution,
-                paint_render_size,
-                paint_texture_size,
                 simplify_before,
                 target_faces,
                 skip_texturing,
-                volume_decoder,
-                left_image_input,
-                back_image_input,
-            ],
-            outputs=[output_3d, output_file, output_obj, current_mesh],
-        ).then(fn=_get_memory_stats, outputs=memory_label)
-
-        def _upscale_current(
-            glb_path, use_delight, no_rembg, use_sd, seed,
-            shp_steps, octree, render_sz, tex_sz, sd_prompt, skip_tex,
-            progress=gr.Progress(),
-        ):
-            global _last_original_input
-            if not _last_original_input or not Path(_last_original_input).exists():
-                raise gr.Error("Generate a model first!")
-            return _run_upscale(
-                _last_original_input, use_delight, no_rembg, use_sd, seed,
-                shp_steps, octree, render_sz, tex_sz, sd_prompt, skip_tex,
-                progress=progress,
-            )
-
-        upscale_btn.click(
-            fn=_upscale_current,
-            inputs=[
-                current_mesh, use_delight, no_rembg, use_sd_upscale, seed,
-                upscale_shp_steps, upscale_octree, upscale_render, upscale_tex,
-                sd_upscale_prompt, skip_texturing,
+                texture_sd_detail,
+                texture_esrgan_sharpen,
             ],
             outputs=[output_3d, output_file, output_obj, current_mesh],
         ).then(fn=_get_memory_stats, outputs=memory_label)
 
         def _retexture_current(
-            glb_path, no_rembg, use_delight, paint_preset, paint_backend,
-            paint_render_size, paint_texture_size, seed, randomize_seed,
+            glb_path, use_delight,
+            seed, randomize_seed,
+            texture_sd_detail=False, texture_esrgan_sharpen=False,
             progress=gr.Progress(),
         ):
             global _last_original_inputs
             if not _last_original_inputs:
                 raise gr.Error("Generate a model first!")
             return _run_retexture(
-                glb_path, _last_original_inputs, no_rembg, use_delight, paint_preset, paint_backend,
-                paint_render_size, paint_texture_size, seed, randomize_seed,
+                glb_path, _last_original_inputs, use_delight,
+                seed, randomize_seed,
+                texture_sd_detail, texture_esrgan_sharpen,
                 progress=progress,
             )
 
         retexture_btn.click(
             fn=_retexture_current,
             inputs=[
-                current_mesh, no_rembg, use_delight, paint_preset, paint_backend,
-                paint_render_size, paint_texture_size, seed, randomize_seed,
+                current_mesh, use_delight,
+                seed, randomize_seed,
+                texture_sd_detail, texture_esrgan_sharpen,
             ],
             outputs=[output_3d, output_file, output_obj, current_mesh],
         ).then(fn=_get_memory_stats, outputs=memory_label)
@@ -1205,50 +1042,13 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 )
                 gen_3d_btn = gr.Button("Generate 3D from Image", variant="primary", size="lg")
 
-                with gr.Group(elem_classes="quiet-box"):
-                    with gr.Row():
-                        shape_preset_t2 = gr.Dropdown(
-                            choices=SHAPE_PRESETS_LIST,
-                            value="2.0-turbo",
-                            label="Shape Model",
-                        )
-                        paint_preset_t2 = gr.Dropdown(
-                            choices=PAINT_PRESETS_LIST,
-                            value="2.0-turbo",
-                            label="Paint Model",
-                        )
-                    with gr.Row():
-                        paint_backend_t2 = gr.Radio(
-                            choices=["mlx", "pytorch"],
-                            value="mlx",
-                            label="Paint Backend",
-                            info="MLX is faster on Apple Silicon",
-                        )
-                        volume_decoder_t2 = gr.Radio(
-                            choices=["vanilla", "flashvdm"],
-                            value="vanilla",
-                            label="Volume Decoder",
-                            info="FlashVDM is faster, but disables Polygon reduction and Upscale.",
-                        )
-                with gr.Group(elem_classes="quiet-box"):
-                    with gr.Row():
-                        btn_lowpoly_t2 = gr.Button("Lowpoly", size="sm")
-                        btn_normal_t2 = gr.Button("Normal", size="sm")
-                        btn_high_t2 = gr.Button("High", size="sm")
-                    no_rembg_t2 = gr.Checkbox(
-                        value=False,
-                        label="Disable background removal",
-                    )
-                    use_delight_t2 = gr.Checkbox(
-                        value=True,
-                        label="Remove lighting (Delight)",
-                        info="Pre-processes the input image to remove lighting before texturing, producing more neutral textures",
-                    )
-                    skip_texturing_t2 = gr.Checkbox(
-                        value=False,
-                        label="Skip texturing (shape only)",
-                        info="Generate the 3D shape mesh without texturing — useful for testing or external texturing",
-                    )
+                with gr.Row(elem_classes="preset-row"):
+                    btn_lowpoly_t2 = gr.Button("Lowpoly", size="sm")
+                    btn_draft_t2 = gr.Button("Draft", size="sm")
+                    btn_normal_t2 = gr.Button("Normal", size="sm")
+                    btn_high_t2 = gr.Button("High", size="sm")
+
+                with gr.Group(elem_classes=["quiet-box", "thin-box"]):
                     seed_t2 = gr.Number(
                         value=12345,
                         label="Seed",
@@ -1257,24 +1057,29 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                         maximum=999999,
                     )
                     simplify_before_t2 = gr.Checkbox(
-                        value=False,
+                        value=True,
                         label="Simplify mesh before texturing",
                         info="Simplifies the shape mesh before the texturing pass, so UVs are generated for the low-poly geometry",
                         elem_id="simplify-checkbox-t2",
                     )
                     target_faces_t2 = gr.Slider(
                         minimum=100,
-                        maximum=10000,
-                        value=2000,
+                        maximum=200000,
+                        value=100000,
                         step=100,
                         label="Target faces",
                     )
                     shape_steps_t2 = gr.Slider(
                         minimum=1,
                         maximum=100,
-                        value=30,
+                        value=8,
                         step=1,
                         label="Shape Steps",
+                        interactive=(SHAPE_BACKEND_DEFAULT != "swift"),
+                        info=(
+                            "Ignored for Swift — fixed at 8 steps (consistency-distilled checkpoint)"
+                            if SHAPE_BACKEND_DEFAULT == "swift" else None
+                        ),
                     )
                     shape_octree_resolution_t2 = gr.Slider(
                         minimum=32,
@@ -1283,54 +1088,36 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                         step=32,
                         label="Octree Resolution",
                     )
-                    paint_render_size_t2 = gr.Slider(
-                        minimum=32,
-                        maximum=1024,
-                        value=1024,
-                        step=32,
-                        label="Render Size",
+
+                with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+                    use_delight_t2 = gr.Checkbox(
+                        value=False,
+                        label="Remove lighting (Delight)",
+                        info="Pre-processes the input image to remove lighting before texturing, producing more neutral textures",
                     )
-                    paint_texture_size_t2 = gr.Slider(
-                        minimum=32,
-                        maximum=1024,
-                        value=1024,
-                        step=32,
-                        label="Texture Size",
+                    skip_texturing_t2 = gr.Checkbox(
+                        value=False,
+                        label="Skip texturing (shape only)",
+                        info="Generate the 3D shape mesh without texturing — useful for testing or external texturing",
                     )
+                    texture_sd_detail_t2 = gr.Checkbox(
+                        value=False,
+                        label="SD Turbo detail pass",
+                        info="Light generative touch-up on each view before baking",
+                    )
+                    texture_esrgan_sharpen_t2 = gr.Checkbox(
+                        value=False,
+                        label="ESRGAN sharpen pass",
+                        info="Cheap upscale/downsample cleanup, runs after SD Turbo",
+                    )
+                    randomize_seed_t2 = gr.Checkbox(value=True, label="Randomize seed")
+                    retexture_btn_t2 = gr.Button("Re-texture", variant="primary", size="lg", elem_id="retexture-btn-t2")
 
             with gr.Column(scale=1):
                 current_mesh_t2 = gr.State()
                 output_3d_t2 = gr.Model3D(label="Result", height=600, elem_id="output-viewer-2")
                 output_file_t2 = gr.File(label="Download .glb")
                 output_obj_t2 = gr.File(label="Download .obj (zipped)")
-                retexture_btn_t2 = gr.Button("Re-texture", variant="primary", size="lg")
-                with gr.Group(elem_classes="quiet-box"):
-                    randomize_seed_t2 = gr.Checkbox(value=True, label="Randomize seed")
-                with gr.Accordion("Upscale (optional)", open=False, elem_classes="brutal-box"):
-                    with gr.Row():
-                        upscale_shp_steps_t2 = gr.Slider(
-                            minimum=10, maximum=100, value=50, step=1,
-                            label="Shape Steps",
-                        )
-                        upscale_octree_t2 = gr.Slider(
-                            minimum=64, maximum=512, value=512, step=32,
-                            label="Octree Resolution",
-                        )
-                    with gr.Row():
-                        upscale_render_t2 = gr.Slider(
-                            minimum=64, maximum=1024, value=1024, step=32,
-                            label="Render Size",
-                        )
-                        upscale_tex_t2 = gr.Slider(
-                            minimum=64, maximum=1024, value=1024, step=32,
-                            label="Texture Size",
-                        )
-                    use_sd_upscale_t2 = gr.Checkbox(
-                        value=True,
-                        label="SD upscale input image",
-                        info="Refines the input image with SD Turbo before regenerating",
-                    )
-                    upscale_btn_t2 = gr.Button("Upscale", variant="primary", size="lg")
 
         gen_image_btn.click(
             fn=generate_image,
@@ -1339,10 +1126,12 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
         ).then(fn=_get_memory_stats, outputs=memory_label)
 
         def generate_from_prompt_image(
-            sd_output_img, shape_preset, paint_preset, paint_backend,
-            no_rembg, use_delight, seed, shape_steps, shape_octree_resolution,
-            paint_render_size, paint_texture_size, simplify_before_texturing,
-            target_faces, skip_texturing=False, volume_decoder="vanilla",
+            sd_output_img,
+            use_delight, seed, shape_steps, shape_octree_resolution,
+            simplify_before_texturing,
+            target_faces, skip_texturing=False,
+            texture_sd_detail=False, texture_esrgan_sharpen=False,
+            shape_backend=SHAPE_BACKEND_DEFAULT,
             progress=gr.Progress()
         ):
             if sd_output_img is None:
@@ -1350,11 +1139,11 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             img_path = OUTPUT_DIR / "_input.png"
             sd_output_img.save(img_path, "PNG")
             glb_path, glb_file, obj_zip, mesh_state = generate(
-                str(img_path), shape_preset, paint_preset, paint_backend,
-                no_rembg, use_delight, seed, shape_steps, shape_octree_resolution,
-                paint_render_size, paint_texture_size,
+                str(img_path),
+                use_delight, seed, shape_steps, shape_octree_resolution,
                 simplify_before_texturing, target_faces, skip_texturing,
-                volume_decoder=volume_decoder, progress=progress,
+                texture_sd_detail, texture_esrgan_sharpen,
+                shape_backend=shape_backend, progress=progress,
             )
             return glb_path, glb_file, obj_zip, mesh_state
 
@@ -1362,88 +1151,53 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             fn=generate_from_prompt_image,
             inputs=[
                 sd_output,
-                shape_preset_t2,
-                paint_preset_t2,
-                paint_backend_t2,
-                no_rembg_t2,
                 use_delight_t2,
                 seed_t2,
                 shape_steps_t2,
                 shape_octree_resolution_t2,
-                paint_render_size_t2,
-                paint_texture_size_t2,
                 simplify_before_t2,
                 target_faces_t2,
                 skip_texturing_t2,
-                volume_decoder_t2,
-            ],
-            outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
-        ).then(fn=_get_memory_stats, outputs=memory_label)
-
-        def _upscale_current_t2(
-            glb_path, use_delight, no_rembg, use_sd, seed,
-            shp_steps, octree, render_sz, tex_sz, sd_prompt, skip_tex,
-            progress=gr.Progress(),
-        ):
-            global _last_original_input
-            if not _last_original_input or not Path(_last_original_input).exists():
-                raise gr.Error("Generate a model first!")
-            return _run_upscale(
-                _last_original_input, use_delight, no_rembg, use_sd, seed,
-                shp_steps, octree, render_sz, tex_sz, sd_prompt, skip_tex,
-                progress=progress,
-            )
-
-        upscale_btn_t2.click(
-            fn=_upscale_current_t2,
-            inputs=[
-                current_mesh_t2, use_delight_t2, no_rembg_t2, use_sd_upscale_t2, seed_t2,
-                upscale_shp_steps_t2, upscale_octree_t2, upscale_render_t2, upscale_tex_t2,
-                prompt_input, skip_texturing_t2,
+                texture_sd_detail_t2,
+                texture_esrgan_sharpen_t2,
             ],
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label)
 
         def _retexture_current_t2(
-            glb_path, no_rembg, use_delight, paint_preset, paint_backend,
-            paint_render_size, paint_texture_size, seed, randomize_seed,
+            glb_path, use_delight,
+            seed, randomize_seed,
+            texture_sd_detail=False, texture_esrgan_sharpen=False,
             progress=gr.Progress(),
         ):
             global _last_original_inputs
             if not _last_original_inputs:
                 raise gr.Error("Generate a model first!")
             return _run_retexture(
-                glb_path, _last_original_inputs, no_rembg, use_delight, paint_preset, paint_backend,
-                paint_render_size, paint_texture_size, seed, randomize_seed,
+                glb_path, _last_original_inputs, use_delight,
+                seed, randomize_seed,
+                texture_sd_detail, texture_esrgan_sharpen,
                 progress=progress,
             )
 
         retexture_btn_t2.click(
             fn=_retexture_current_t2,
             inputs=[
-                current_mesh_t2, no_rembg_t2, use_delight_t2, paint_preset_t2, paint_backend_t2,
-                paint_render_size_t2, paint_texture_size_t2, seed_t2, randomize_seed_t2,
+                current_mesh_t2, use_delight_t2,
+                seed_t2, randomize_seed_t2,
+                texture_sd_detail_t2, texture_esrgan_sharpen_t2,
             ],
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label)
 
-        btn_lowpoly_t2.click(
-            fn=lambda: _set_preset("lowpoly"),
-            outputs=[shape_preset_t2, paint_preset_t2, volume_decoder_t2, shape_steps_t2, shape_octree_resolution_t2, paint_render_size_t2, paint_texture_size_t2, use_delight_t2, simplify_before_t2, target_faces_t2],
-        )
-        btn_normal_t2.click(
-            fn=lambda: _set_preset("normal"),
-            outputs=[shape_preset_t2, paint_preset_t2, volume_decoder_t2, shape_steps_t2, shape_octree_resolution_t2, paint_render_size_t2, paint_texture_size_t2],
-        )
-        btn_high_t2.click(
-            fn=lambda: _set_preset("high"),
-            outputs=[shape_preset_t2, paint_preset_t2, volume_decoder_t2, shape_steps_t2, shape_octree_resolution_t2, paint_render_size_t2, paint_texture_size_t2],
-        )
-        volume_decoder_t2.change(
-            fn=_on_volume_decoder_change,
-            inputs=[volume_decoder_t2],
-            outputs=[simplify_before_t2, target_faces_t2, upscale_btn_t2],
-        )
+        _preset_outputs_t2 = [
+            shape_steps_t2, shape_octree_resolution_t2, use_delight_t2, simplify_before_t2,
+            target_faces_t2, skip_texturing_t2, texture_sd_detail_t2, texture_esrgan_sharpen_t2,
+        ]
+        btn_lowpoly_t2.click(fn=lambda: _set_preset("lowpoly"), outputs=_preset_outputs_t2)
+        btn_draft_t2.click(fn=lambda: _set_preset("draft"), outputs=_preset_outputs_t2)
+        btn_normal_t2.click(fn=lambda: _set_preset("normal"), outputs=_preset_outputs_t2)
+        btn_high_t2.click(fn=lambda: _set_preset("high"), outputs=_preset_outputs_t2)
 
     demo.queue()
 

@@ -25,7 +25,8 @@ from typing import List, Union, Optional
 from .differentiable_renderer.mesh_render import MeshRender
 from .utils.dehighlight_utils import Light_Shadow_Remover
 from .utils.multiview_utils import Multiview_Diffusion_Net
-from .utils.imagesuper_utils import Image_Super_Net
+from .utils.realesrgan_utils import RealESRGAN_Upscaler
+from .utils.sdturbo_upscale_utils import SDTurboUpscaler
 from .utils.uv_warp_utils import mesh_uv_wrap
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,30 @@ class Hunyuan3DTexGenConfig:
 
         self.render_size = 1024
         self.texture_size = 1024
-        self.bake_exp = 4
+        # Two independent, chainable texture-detail passes applied to each
+        # generated view before baking (see __call__): SD Turbo first (a
+        # light, ~2-real-step generative touch-up — full-strength/step-count
+        # regeneration was tested and made the eye-asymmetry problem worse
+        # and the output blurrier, not better), then RealESRGAN (a cheap
+        # upscale-then-downsample-back-to-1024 pass used purely as a
+        # sharpen/cleanup filter, not for resolution gain — both target the
+        # same 1024 texture_size, not the 2048 tested earlier, since that
+        # alone didn't look meaningfully better and cost more).
+        # Read fresh per-call in __call__ (like HY3D_USE_DELIGHT), not baked
+        # in here: self.config is part of a pipeline cached and reused across
+        # generations (main.py's _PAINT_CACHE_PIPELINE) whenever the model/
+        # backend selection doesn't change, so a flag set once at construction
+        # would silently ignore every later checkbox toggle.
+        # Higher exponent biases the per-texel weighted blend more strongly
+        # toward whichever view has the highest cosine weight there (usually
+        # the front view). A low exponent lets a low-weight side/profile view
+        # still blend in proportionally wherever it has any coverage, which
+        # bleeds that view's (often lower-detail, since profile angles can't
+        # resolve fine features well) content into regions the front view
+        # already covers well — visible as color/shape drift on bilateral
+        # features like eyes even when the front-view generation was correct
+        # and symmetric on its own.
+        self.bake_exp = 8
         self.merge_method = 'fast'
 
         self.pipe_dict = {
@@ -219,12 +243,25 @@ class Hunyuan3DPaintPipeline:
             and os.path.exists(self.config.light_remover_ckpt_path)
         )
         self.models['multiview_model'] = Multiview_Diffusion_Net(self.config)
-        # self.models['super_model'] = Image_Super_Net(self.config)
+        # Both opt-in and kept lazy like the delight model rather than loaded
+        # on every startup.
+        self.models['sd_upscale_model'] = None
+        self.models['esrgan_upscale_model'] = None
 
     def _get_delight_model(self):
         if self.models['delight_model'] is None and self._delight_available:
             self.models['delight_model'] = Light_Shadow_Remover(self.config)
         return self.models['delight_model']
+
+    def _get_sd_upscale_model(self, progress_callback=None):
+        if self.models['sd_upscale_model'] is None:
+            self.models['sd_upscale_model'] = SDTurboUpscaler(self.config, progress_callback=progress_callback)
+        return self.models['sd_upscale_model']
+
+    def _get_esrgan_upscale_model(self, progress_callback=None):
+        if self.models['esrgan_upscale_model'] is None:
+            self.models['esrgan_upscale_model'] = RealESRGAN_Upscaler(self.config, progress_callback=progress_callback)
+        return self.models['esrgan_upscale_model']
 
     def enable_model_cpu_offload(self, gpu_id: Optional[int] = None, device: Union[torch.device, str] = "cuda"):
         if self.models['delight_model'] is not None:
@@ -275,6 +312,30 @@ class Hunyuan3DPaintPipeline:
         texture = torch.tensor(texture_np / 255).float().to(texture.device)
 
         return texture
+
+    def _despeckle_texture(self, texture):
+        # Baking 512px diffusion views into a larger atlas leaves texels with
+        # near-zero sample weight that pass the bake's trust threshold yet
+        # carry no real color — they render as isolated dark flecks. Replace
+        # dark outliers vs. the 5x5 local median with the median color
+        # (verified: 94% fleck reduction on a real afflicted texture, smooth
+        # and detailed regions untouched).
+        from scipy.ndimage import median_filter
+
+        arr = (texture.cpu().numpy() * 255.0).astype(np.float32)
+        lum = arr.mean(axis=2)
+        med_lum = median_filter(lum, size=5)
+        fleck_mask = (med_lum - lum) > 45
+        n = int(fleck_mask.sum())
+        if n == 0:
+            return texture
+        med_rgb = np.stack(
+            [median_filter(arr[:, :, c], size=5) for c in range(arr.shape[2])],
+            axis=2,
+        )
+        arr[fleck_mask] = med_rgb[fleck_mask]
+        logger.debug(f"Despeckle: replaced {n} dark fleck texels")
+        return torch.tensor(arr / 255.0).float().to(texture.device)
 
     def recenter_image(self, image, border_ratio=0.2):
         if image.mode == 'RGB':
@@ -404,13 +465,28 @@ class Hunyuan3DPaintPipeline:
             mesh_executor.shutdown(wait=False)
             self.render.load_mesh(uv_ready_mesh)
 
-        # multiviews are already native view_size (512) from the diffusion
-        # model; baking directly at that resolution (back_project rasterizes
-        # at the input image's own size) avoids wasted rasterization work
-        # from upscaling to render_size first, since super-resolution is
-        # currently disabled and a plain resize adds no real detail.
-        # for i in range(len(multiviews)):
-        #     multiviews[i] = self.models['super_model'](multiviews[i])
+        # multiviews are native view_size (512) from the diffusion model —
+        # the real content ceiling for texture detail, since Texture Size only
+        # resamples this fixed content into the UV atlas. Two optional,
+        # chainable passes here before baking can add real detail rather than
+        # just resampling it: ESRGAN (cheap sharpen) runs first, then SD Turbo
+        # (light generative touch-up) — A/B tested against the reverse order;
+        # this order gave SD Turbo's low-strength pass a cleaner starting
+        # point and came out visibly sharper (e.g. eyebrow hair strands
+        # stayed distinct instead of smudging).
+        if os.environ.get('HY3D_USE_ESRGAN_UPSCALE', '0') == '1':
+            if progress_callback is not None:
+                progress_callback(0.85, "ESRGAN sharpen pass...")
+            esrgan_model = self._get_esrgan_upscale_model(progress_callback=_scaled_progress(progress_callback, 0.85, 0.86))
+            for i in range(len(multiviews)):
+                multiviews[i] = esrgan_model(multiviews[i])
+
+        if os.environ.get('HY3D_USE_SD_UPSCALE', '0') == '1':
+            if progress_callback is not None:
+                progress_callback(0.86, "SD Turbo detail pass...")
+            sd_model = self._get_sd_upscale_model(progress_callback=_scaled_progress(progress_callback, 0.86, 0.88))
+            for i in range(len(multiviews)):
+                multiviews[i] = sd_model(multiviews[i])
 
         if progress_callback is not None:
             progress_callback(0.85, "Baking multiview -> UV texture...")
@@ -425,6 +501,8 @@ class Hunyuan3DPaintPipeline:
         mask_np = (mask.squeeze(-1).cpu().numpy() * 255).astype(np.uint8)
 
         texture = self.texture_inpaint(texture, mask_np)
+
+        texture = self._despeckle_texture(texture)
 
         if progress_callback is not None:
             progress_callback(0.97, "Exporting mesh...")

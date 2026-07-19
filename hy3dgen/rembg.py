@@ -23,3 +23,17 @@ class BackgroundRemover():
     def __call__(self, image: Image.Image):
         output = remove(image, session=self.session, bgcolor=[255, 255, 255, 0])
         return output
+
+
+# new_session() loads an ONNX Runtime model from disk — real cost, not a
+# no-op. A single generation can call into rembg from both the shape and
+# paint stages; sharing one instance avoids paying that load twice for
+# what is otherwise a stateless, deterministic operation.
+_shared_remover = None
+
+
+def get_background_remover() -> "BackgroundRemover":
+    global _shared_remover
+    if _shared_remover is None:
+        _shared_remover = BackgroundRemover()
+    return _shared_remover

@@ -150,6 +150,21 @@ class Multiview_Diffusion_Net():
 
         self.seed_everything(seed)
 
+        # HybridMLXUNet._cache memoizes reference-image conditioning
+        # (condition_embed_dict, dino_hidden_states_proj) across the ~30
+        # denoising steps of ONE generation — legitimate, since the
+        # reference image doesn't change mid-generation. But the cache dict
+        # itself lives on the UNet object, which now persists across
+        # separate generations (paint pipeline caching), and was never
+        # cleared between them: every generation after the first silently
+        # reused the FIRST generation's reference embeddings regardless of
+        # what image was actually passed this time. Verified: a urinal photo
+        # generated cat-fur texture content because the paint pipeline had
+        # been warmed up on a cat photo earlier in the same session.
+        mlx_hybrid = getattr(self, "_mlx_hybrid", None)
+        if mlx_hybrid is not None:
+            mlx_hybrid._cache.clear()
+
         if not isinstance(input_images, List):
             input_images = [input_images]
 

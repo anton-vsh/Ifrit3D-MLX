@@ -99,9 +99,9 @@ def load_pil_images(paths: List[Path], use_rembg: bool) -> List[Any]:
 
     remover = None
     if use_rembg:
-        from hy3dgen.rembg import BackgroundRemover
+        from hy3dgen.rembg import get_background_remover
 
-        remover = BackgroundRemover()
+        remover = get_background_remover()
 
     out: List[Any] = []
     for p in paths:
@@ -147,8 +147,9 @@ _PAINT_CACHE_PIPELINE = None
 _PAINT_CACHE_LOCK = threading.Lock()
 
 
-def get_or_load_paint_pipeline(model_repo, subfolder, diffusion_backend, mlx_weights_path, pbr_albedo_only=False):
+def get_or_load_paint_pipeline(model_repo, subfolder, diffusion_backend, mlx_weights_path, pbr_albedo_only=False, progress_callback=None):
     from hy3dgen.texgen import Hunyuan3DPaintPipeline
+    from hf_progress import report_hf_downloads
 
     global _PAINT_CACHE_KEY, _PAINT_CACHE_PIPELINE
 
@@ -169,13 +170,14 @@ def get_or_load_paint_pipeline(model_repo, subfolder, diffusion_backend, mlx_wei
                     torch.mps.empty_cache()
                 gc.collect()
 
-            _PAINT_CACHE_PIPELINE = Hunyuan3DPaintPipeline.from_pretrained(
-                model_repo,
-                subfolder=subfolder,
-                diffusion_backend=diffusion_backend,
-                mlx_weights_path=mlx_weights_path,
-                pbr_albedo_only=pbr_albedo_only,
-            )
+            with report_hf_downloads(progress_callback, f"Downloading paint model {model_repo}/{subfolder} (first run only)"):
+                _PAINT_CACHE_PIPELINE = Hunyuan3DPaintPipeline.from_pretrained(
+                    model_repo,
+                    subfolder=subfolder,
+                    diffusion_backend=diffusion_backend,
+                    mlx_weights_path=mlx_weights_path,
+                    pbr_albedo_only=pbr_albedo_only,
+                )
             _PAINT_CACHE_KEY = key
 
         return _PAINT_CACHE_PIPELINE
@@ -191,11 +193,8 @@ def run_paint_pipeline(mesh, image_paths: List[Path], args, progress_callback=No
     painter = get_or_load_paint_pipeline(
         model_repo, subfolder, args.paint_diffusion_backend, args.paint_mlx_weights,
         pbr_albedo_only=getattr(args, 'paint_basic_texture', False),
+        progress_callback=progress_callback,
     )
-    painter.config.render_size = args.paint_render_size
-    painter.config.texture_size = args.paint_texture_size
-    painter.render.set_default_render_resolution(args.paint_render_size)
-    painter.render.set_default_texture_resolution(args.paint_texture_size)
 
     t0 = time.time()
     textured = painter(mesh, image=image_input, seed=getattr(args, 'seed', 0), progress_callback=progress_callback)
@@ -222,14 +221,14 @@ def add_shape_model_args(p):
     p.add_argument("--shape-steps", type=int, default=30)
     p.add_argument("--shape-octree-resolution", type=int, default=256)
     p.add_argument("--shape-num-chunks", type=int, default=12000)
+    p.add_argument("--shape-backend", choices=["pytorch", "swift"], default="pytorch",
+                    help="swift uses the native MLX-Swift hy3d binary (2.0-turbo preset only, single-image only)")
 
 
 def add_paint_model_args(p):
     p.add_argument("--paint-preset", choices=sorted(PAINT_PRESETS), help="Paint model preset")
     p.add_argument("--paint-model-repo", help="Override paint model repo")
     p.add_argument("--paint-subfolder", help="Override paint model subfolder")
-    p.add_argument("--paint-render-size", type=int, default=1024)
-    p.add_argument("--paint-texture-size", type=int, default=1024)
     p.add_argument(
         "--paint-diffusion-backend",
         choices=["pytorch", "mlx"],

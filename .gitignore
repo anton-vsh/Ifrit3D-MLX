@@ -17,6 +17,11 @@ outputs/sv/
 outputs/_input.png
 # Local model weights
 models/
+# Vendored Swift `hy3d` binary + Metal resource bundle (built via xcodebuild
+# from ZimengXiong/Hunyuan3D-MLX; not source-controlled build artifacts)
+swift/bin/
+# LLVM coverage artifact the hy3d binary drops when run outside our wrapper
+default.profraw
 # C extensions
 *.so
 

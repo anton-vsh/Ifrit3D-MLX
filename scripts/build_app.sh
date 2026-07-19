@@ -58,8 +58,16 @@ cp -RL ".venv/lib/python$PY_VERSION/site-packages" "$APP_BUNDLE/Contents/Resourc
 echo "==> Copying application source"
 cp -R hy3dgen "$APP_BUNDLE/Contents/Resources/app/"
 cp -R shape "$APP_BUNDLE/Contents/Resources/app/"
-cp app.py main.py "$APP_BUNDLE/Contents/Resources/app/"
+cp app.py main.py hf_progress.py "$APP_BUNDLE/Contents/Resources/app/"
 cp scripts/menubar_helper.py "$APP_BUNDLE/Contents/Resources/app/"
+
+if [ -x "swift/bin/hy3d" ]; then
+  echo "==> Bundling Swift hy3d binary (accelerated shape backend)"
+  mkdir -p "$APP_BUNDLE/Contents/Resources/app/swift/bin"
+  cp -RL "swift/bin/hy3d" "swift/bin/mlx-swift_Cmlx.bundle" "$APP_BUNDLE/Contents/Resources/app/swift/bin/"
+else
+  echo "    (no local swift/bin/hy3d build found — shape backend defaults to pytorch; see swift/README.md)"
+fi
 
 echo "==> Writing Info.plist"
 sed "s/__VERSION__/$VERSION/g" scripts/Info.plist.template > "$APP_BUNDLE/Contents/Info.plist"
