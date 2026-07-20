@@ -204,8 +204,34 @@ class Hunyuan3DPaintPipeline:
         resolved_mlx_weights_path = mlx_weights_path
         if diffusion_backend == 'mlx' and resolved_mlx_weights_path is None:
             resolved_mlx_weights_path = _default_mlx_weights_path(multiview_model_path, mlx_profile, subfolder)
-            if not os.path.exists(os.path.join(resolved_mlx_weights_path, 'unet.npz')):
-                resolved_mlx_weights_path = _download_mlx_weights_from_hf(mlx_profile, subfolder)
+
+            from .mlx.convert_weights import is_mlx_weights_current, convert_and_save
+
+            if not is_mlx_weights_current(resolved_mlx_weights_path):
+                # Missing entirely, or stamped from an older conversion
+                # (e.g. the v1->v2 fix for a stale-checkpoint bug: the
+                # converter used to read diffusion_pytorch_model.bin
+                # unconditionally, which for hunyuan3d-paint-v2-0-turbo is
+                # an older training snapshot than the .safetensors file
+                # diffusers actually loads). multiview_model_path already
+                # holds (or was just downloaded to hold) the real PyTorch
+                # checkpoint at this point regardless of backend, so
+                # converting locally is both correct-by-construction (same
+                # source diffusers itself will load) and avoids depending
+                # on a third-party pre-converted upload staying in sync
+                # with this converter's own fixes. Only fall back to the
+                # HF-hosted pre-converted weights if local conversion
+                # itself can't run (e.g. torch/mlx not importable here).
+                try:
+                    resolved_mlx_weights_path, _ = convert_and_save(
+                        multiview_model_path,
+                        output_dir=resolved_mlx_weights_path,
+                        profile=mlx_profile,
+                    )
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                    resolved_mlx_weights_path = _download_mlx_weights_from_hf(mlx_profile, subfolder)
 
         return cls(
             Hunyuan3DTexGenConfig(
@@ -316,25 +342,38 @@ class Hunyuan3DPaintPipeline:
     def _despeckle_texture(self, texture):
         # Baking 512px diffusion views into a larger atlas leaves texels with
         # near-zero sample weight that pass the bake's trust threshold yet
-        # carry no real color — they render as isolated dark flecks. Replace
-        # dark outliers vs. the 5x5 local median with the median color
-        # (verified: 94% fleck reduction on a real afflicted texture, smooth
-        # and detailed regions untouched).
+        # carry no real color — they render as isolated flecks. Two variants,
+        # both replaced with the local 5x5 median color: dark flecks (near-
+        # black vs. local luminance median; verified 94% reduction on a real
+        # afflicted texture, smooth/detailed regions untouched) and chromatic
+        # flecks (a wrong-hued speck that isn't necessarily darker — e.g.
+        # blue/teal specks on an otherwise white/cream surface — which the
+        # dark-only check misses entirely). Median filtering is edge-
+        # preserving for genuine color boundaries (a pixel right at a real
+        # edge still matches its own side's local-majority color, so the
+        # diff stays small there), so this cleans isolated outlier texels
+        # without blurring real detail.
         from scipy.ndimage import median_filter
 
         arr = (texture.cpu().numpy() * 255.0).astype(np.float32)
         lum = arr.mean(axis=2)
         med_lum = median_filter(lum, size=5)
-        fleck_mask = (med_lum - lum) > 45
-        n = int(fleck_mask.sum())
-        if n == 0:
-            return texture
         med_rgb = np.stack(
             [median_filter(arr[:, :, c], size=5) for c in range(arr.shape[2])],
             axis=2,
         )
+        dark_mask = (med_lum - lum) > 45
+        chroma_dist = np.sqrt(((arr - med_rgb) ** 2).sum(axis=2))
+        chroma_mask = chroma_dist > 70
+        fleck_mask = dark_mask | chroma_mask
+        n = int(fleck_mask.sum())
+        if n == 0:
+            return texture
         arr[fleck_mask] = med_rgb[fleck_mask]
-        logger.debug(f"Despeckle: replaced {n} dark fleck texels")
+        logger.debug(
+            f"Despeckle: replaced {n} fleck texels "
+            f"({int(dark_mask.sum())} dark, {int(chroma_mask.sum())} chromatic)"
+        )
         return torch.tensor(arr / 255.0).float().to(texture.device)
 
     def recenter_image(self, image, border_ratio=0.2):

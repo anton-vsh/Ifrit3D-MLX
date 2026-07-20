@@ -129,6 +129,7 @@ class HybridMLXUNet:
         print(f"[MLX] Loading UNet weights ({self.profile}, pbr_settings={self.pbr_settings}) from {weights_path} ...")
         t0 = time.time()
         raw = dict(np.load(unet_npz, allow_pickle=True))
+        raw.pop("__convert_version__", None)  # metadata stamp, not a model param
         if pbr_albedo_only and self.profile != PROFILE_PAINT_20:
             # The checkpoint was converted for the full 2-channel (albedo+mr)
             # model. Filter to just the keys this smaller model actually has —

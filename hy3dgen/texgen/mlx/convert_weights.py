@@ -19,6 +19,20 @@ import numpy as np
 PROFILE_PAINT_20 = "paint-2.0"
 PROFILE_PAINT_PBR_21 = "paint-pbr-2.1"
 
+# Bump whenever a change here would produce materially different weights
+# from a previous conversion of the same source checkpoint (e.g. fixing
+# which source file gets read, changing which keys get skipped/remapped).
+# Stamped into every converted unet.npz so stale local/cached conversions
+# can be detected and regenerated automatically instead of silently
+# reused forever. v1 (unstamped) read diffusion_pytorch_model.bin
+# unconditionally, which for hunyuan3d-paint-v2-0-turbo is a stale
+# checkpoint relative to the .safetensors file diffusers actually loads
+# by default -- confirmed via direct weight diff (~20% systematic
+# magnitude difference on always-active weights like class_embedding,
+# plus 36 IP-Adapter keys present only in .safetensors). v2 prefers
+# .safetensors and skips those (confirmed-dormant) IP-Adapter keys.
+CONVERT_FORMAT_VERSION = 2
+
 # Lazy imports so module can be imported without torch/mlx installed.
 _torch = None
 _mx = None
@@ -78,6 +92,34 @@ def _resolve_model_subfolder(model_path: str, profile: str) -> str:
 
     raise FileNotFoundError(
         f"Could not locate a paint model subfolder with unet/ + vae/ under: {model_path}"
+    )
+
+
+def _load_checkpoint_state_dict(component_dir: str) -> dict:
+    """Load a diffusers component's state dict, preferring .safetensors.
+
+    Some checkpoint directories on disk carry both a .bin and a
+    .safetensors file for the same nominal weights, and they are not
+    always the same training snapshot — verified on this project's own
+    cached hunyuan3d-paint-v2-0-turbo/unet/, where the .bin is a stale
+    checkpoint (missing 36 keys entirely, and differing by ~20% on
+    weights present in both, e.g. class_embedding.weight) relative to the
+    .safetensors file. diffusers' own `from_pretrained` prefers
+    .safetensors whenever both exist, so silently loading .bin here made
+    every past MLX conversion diverge from what the live PyTorch pipeline
+    actually runs. Mirror that preference here instead of hardcoding .bin.
+    """
+    st_path = os.path.join(component_dir, "diffusion_pytorch_model.safetensors")
+    bin_path = os.path.join(component_dir, "diffusion_pytorch_model.bin")
+
+    if os.path.exists(st_path):
+        from safetensors.torch import load_file
+        return load_file(st_path)
+    if os.path.exists(bin_path):
+        torch = _get_torch()
+        return torch.load(bin_path, map_location="cpu", weights_only=True)
+    raise FileNotFoundError(
+        f"No diffusion_pytorch_model.safetensors or .bin found in {component_dir}"
     )
 
 
@@ -166,6 +208,22 @@ def convert_unet_weights(pytorch_state_dict, profile: str):
     mlx_weights = {}
 
     for key, tensor in pytorch_state_dict.items():
+        # IP-Adapter weights (to_k_ip/to_v_ip on every attn2, plus the
+        # image_proj_model that feeds them) are present in the
+        # .safetensors checkpoint but have no counterpart in the MLX
+        # architecture, which never implements IP-Adapter cross-attention.
+        # Confirmed dormant, not just unimplemented: the hunyuanpaint
+        # pipeline only activates this path when `ip_adapter_image` or
+        # `ip_adapter_image_embeds` is explicitly passed to __call__, and
+        # this project's pipeline call sites (multiview_utils.py) never
+        # pass either — reference-image grounding here goes through the
+        # separate ref_latents/unet_dual dual-stream mechanism instead,
+        # which the MLX port does implement. Skipping these keeps the
+        # conversion aligned with what the model can actually load,
+        # instead of silently loading a strict-mode-broken 36 params.
+        if "to_k_ip" in key or "to_v_ip" in key or "image_proj_model." in key:
+            continue
+
         arr = tensor.cpu().numpy()
         new_key = key
         transform = None
@@ -265,8 +323,27 @@ def convert_vae_weights(pytorch_state_dict):
     return mlx_weights
 
 
+def is_mlx_weights_current(weights_dir: str) -> bool:
+    """Check whether a converted unet.npz is stamped with the current
+    CONVERT_FORMAT_VERSION, without loading the full (multi-GB) archive.
+
+    Returns False for missing files and for pre-stamp (v1) conversions,
+    exactly like any conversion that should be regenerated.
+    """
+    unet_npz = os.path.join(weights_dir, "unet.npz")
+    if not os.path.exists(unet_npz):
+        return False
+    try:
+        with np.load(unet_npz, allow_pickle=True) as npz:
+            if "__convert_version__" not in npz.files:
+                return False
+            return int(npz["__convert_version__"]) == CONVERT_FORMAT_VERSION
+    except Exception:
+        return False
+
+
 def convert_and_save(model_path: str, output_dir: str | None = None, profile: str | None = None):
-    torch = _get_torch()
+    _get_torch()  # ensure torch is installed early for clearer errors
     _get_mx()  # ensure mlx is installed early for clearer errors
 
     profile = _infer_profile(model_path, profile)
@@ -279,11 +356,8 @@ def convert_and_save(model_path: str, output_dir: str | None = None, profile: st
     print(f"[MLX] model_path={model_path}")
     print(f"[MLX] output_dir={output_dir}")
 
-    unet_path = os.path.join(model_path, "unet", "diffusion_pytorch_model.bin")
-    vae_path = os.path.join(model_path, "vae", "diffusion_pytorch_model.bin")
-
     print("\nLoading UNet weights...")
-    unet_sd = torch.load(unet_path, map_location="cpu", weights_only=True)
+    unet_sd = _load_checkpoint_state_dict(os.path.join(model_path, "unet"))
     print(f"  {len(unet_sd)} PyTorch keys loaded")
 
     print("Converting UNet weights...")
@@ -293,6 +367,8 @@ def convert_and_save(model_path: str, output_dir: str | None = None, profile: st
     conv_count = sum(1 for _, v in unet_mlx.items() if getattr(v, "ndim", 0) == 4)
     print(f"  {conv_count} conv weights transposed to NHWC")
 
+    unet_mlx["__convert_version__"] = np.array(CONVERT_FORMAT_VERSION)
+
     unet_out = os.path.join(output_dir, "unet.npz")
     np.savez(unet_out, **unet_mlx)
     print(f"  Saved {unet_out} ({os.path.getsize(unet_out) / 1024 ** 2:.1f} MB)")
@@ -300,7 +376,7 @@ def convert_and_save(model_path: str, output_dir: str | None = None, profile: st
     del unet_sd, unet_mlx
 
     print("\nLoading VAE weights...")
-    vae_sd = torch.load(vae_path, map_location="cpu", weights_only=True)
+    vae_sd = _load_checkpoint_state_dict(os.path.join(model_path, "vae"))
     print(f"  {len(vae_sd)} PyTorch keys loaded")
 
     print("Converting VAE weights...")
@@ -316,18 +392,14 @@ def convert_and_save(model_path: str, output_dir: str | None = None, profile: st
 
 
 def validate_conversion(model_path: str, output_dir: str | None = None, profile: str | None = None):
-    torch = _get_torch()
-
     profile = _infer_profile(model_path, profile)
     model_path = _resolve_model_subfolder(model_path, profile)
     if output_dir is None:
         output_dir = _default_output_dir(model_path, profile)
 
     print("=== Validating UNet conversion ===")
-    unet_pt = torch.load(
-        os.path.join(model_path, "unet", "diffusion_pytorch_model.bin"),
-        map_location="cpu",
-        weights_only=True,
+    unet_pt = _load_checkpoint_state_dict(
+        os.path.join(model_path, "unet"),
     )
     unet_mlx = dict(np.load(os.path.join(output_dir, "unet.npz"), allow_pickle=True))
 

@@ -882,6 +882,19 @@ class MeshRender():
             trust_map_merge += cos_map
         texture_merge = texture_merge / torch.clamp(trust_map_merge, min=1E-8)
 
+        # Tested raising this threshold (a "trust floor") to route low-
+        # confidence texels through uv_inpaint's smoothing instead of
+        # accepting near-random single-weak-view color as trusted — intended
+        # fix for colored "confetti" shards on geometrically complex meshes
+        # (e.g. a hole-punched surface). Disproven: verified on a real case
+        # that raising it (tried 0.02, then 0.3) didn't reduce the shards and
+        # made them worse at 0.3 (introduced a new solid bad patch) — the
+        # vertex-adjacency inpaint fallback is apparently no better-behaved
+        # on this same fragmented geometry, so pushing more texels through
+        # it isn't a fix. Reverted to the original threshold. Root cause is
+        # still open; leading theory is independent per-view color/lighting
+        # disagreement on a plain, texture-less surface (same class as the
+        # exterior-back hallucination issue), not a trust/normalization bug.
         return texture_merge, trust_map_merge > 1E-8
 
     def uv_inpaint(self, texture, mask):
