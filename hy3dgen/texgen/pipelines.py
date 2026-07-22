@@ -273,6 +273,13 @@ class Hunyuan3DPaintPipeline:
         # on every startup.
         self.models['sd_upscale_model'] = None
         self.models['esrgan_upscale_model'] = None
+        self.models['subject_classifier'] = None
+
+    def _get_subject_classifier(self):
+        if self.models['subject_classifier'] is None:
+            from .utils.subject_classifier import SubjectClassifier
+            self.models['subject_classifier'] = SubjectClassifier(device=self.config.device)
+        return self.models['subject_classifier']
 
     def _get_delight_model(self):
         if self.models['delight_model'] is None and self._delight_available:
@@ -524,8 +531,16 @@ class Hunyuan3DPaintPipeline:
             if progress_callback is not None:
                 progress_callback(0.86, "SD Turbo detail pass...")
             sd_model = self._get_sd_upscale_model(progress_callback=_scaled_progress(progress_callback, 0.86, 0.88))
+            # Zero-shot classify the reference photo once per generation so
+            # SD Turbo's prompt names the actual subject instead of only a
+            # generic quality phrase (see SDTurboUpscaler.DEFAULT_PROMPT's
+            # comment for why this matters with guidance_scale=0). Low-
+            # confidence classifications fall back to the generic prompt
+            # (subject=None) rather than force a poor label onto every view.
+            subject = self._get_subject_classifier()(images_prompt[0])
+            logger.debug(f"SD Turbo detail pass subject: {subject!r}")
             for i in range(len(multiviews)):
-                multiviews[i] = sd_model(multiviews[i])
+                multiviews[i] = sd_model(multiviews[i], subject=subject)
 
         if progress_callback is not None:
             progress_callback(0.85, "Baking multiview -> UV texture...")

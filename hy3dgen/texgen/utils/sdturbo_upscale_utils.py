@@ -61,19 +61,24 @@ class SDTurboUpscaler():
     # guidance_scale=0.0 (below) disables classifier-free guidance, which is
     # how SD Turbo is meant to run — it does NOT mean the prompt is ignored:
     # it's still text-encoded and fed into the UNet's cross-attention every
-    # step. At this low strength/step-count the img2img source image already
-    # fixes content, so this is a generic quality/style nudge, not a
-    # description of what's actually in the image.
+    # step. But with CFG off, the prompt's actual influence on the output is
+    # weak relative to the img2img source image, so a purely generic quality
+    # phrase barely moves fine detail — verified: naming the actual subject
+    # (e.g. "a cat, highly detailed...") measurably recovers detail a
+    # generic-only prompt does not (sharper eyes, distinct whisker strands
+    # on a real test case), because there's now an actual content signal for
+    # the (weak) text conditioning to reinforce rather than only style words.
     DEFAULT_PROMPT = "highly detailed, sharp, photorealistic texture"
 
     @torch.no_grad()
-    def __call__(self, image: Image.Image) -> Image.Image:
+    def __call__(self, image: Image.Image, subject: str = None) -> Image.Image:
+        prompt = f"{subject}, {self.DEFAULT_PROMPT}" if subject else self.DEFAULT_PROMPT
         upsampled = image.convert('RGB').resize(
             (self.texture_size, self.texture_size), Image.LANCZOS,
         )
         with _SD_LOCK:
             out = self.pipe(
-                prompt=self.DEFAULT_PROMPT,
+                prompt=prompt,
                 image=upsampled,
                 strength=self.strength,
                 height=self.texture_size,
