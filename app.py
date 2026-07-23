@@ -168,7 +168,15 @@ def _free_mps():
 def _run_retexture(
     glb_path, image_paths_state, use_delight,
     seed, randomize_seed,
-    texture_sd_detail=False, texture_esrgan_sharpen=False,
+    texture_sd_detail=False,
+    use_swift_paint=False,
+    paint_res=512,
+    paint_steps=15,
+    paint_guidance=2.0,
+    paint_tex=2048,
+    paint_superres=False,
+    paint_sd_strength=0.3,
+    paint_sd_res=768,
     progress=gr.Progress(),
 ):
     if not glb_path:
@@ -185,20 +193,27 @@ def _run_retexture(
     mesh = loaded.to_geometry() if isinstance(loaded, trimesh.Scene) else loaded
 
     os.environ['HY3D_USE_DELIGHT'] = '1' if use_delight else '0'
-    os.environ['HY3D_USE_SD_UPSCALE'] = '1' if texture_sd_detail else '0'
-    os.environ['HY3D_USE_ESRGAN_UPSCALE'] = '1' if texture_esrgan_sharpen else '0'
+    os.environ['HY3D_USE_SD_UPSCALE'] = '1' if (texture_sd_detail and not use_swift_paint) else '0'
 
     resolved_seed = random.randint(0, 999999) if randomize_seed else seed
 
     args = Namespace(
         no_rembg=False,
         seed=resolved_seed,
-        paint_preset="2.0-turbo",
+        paint_preset="2.0" if use_swift_paint else "2.0-turbo",
         paint_model_repo=None,
         paint_subfolder=None,
-        paint_diffusion_backend="mlx",
+        paint_diffusion_backend="swift" if use_swift_paint else "mlx",
         paint_mlx_weights=None,
         paint_basic_texture=True,
+        paint_res=paint_res,
+        paint_steps=paint_steps,
+        paint_guidance=paint_guidance,
+        paint_tex=paint_tex,
+        paint_superres=paint_superres,
+        paint_sd_detail=texture_sd_detail if use_swift_paint else False,
+        paint_sd_strength=paint_sd_strength,
+        paint_sd_res=paint_sd_res,
     )
 
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-retexture")
@@ -231,7 +246,14 @@ def generate(
     target_faces,
     skip_texturing=False,
     texture_sd_detail=False,
-    texture_esrgan_sharpen=False,
+    use_swift_paint=False,
+    paint_res=512,
+    paint_steps=15,
+    paint_guidance=2.0,
+    paint_tex=2048,
+    paint_superres=False,
+    paint_sd_strength=0.3,
+    paint_sd_res=768,
     shape_backend=SHAPE_BACKEND_DEFAULT,
     run_dir=None,
     progress=gr.Progress(),
@@ -251,8 +273,7 @@ def generate(
         os.environ.pop('HY3D_USE_DELIGHT', None)
 
     os.environ['HY3D_USE_FLASHVDM'] = '0'
-    os.environ['HY3D_USE_SD_UPSCALE'] = '1' if texture_sd_detail else '0'
-    os.environ['HY3D_USE_ESRGAN_UPSCALE'] = '1' if texture_esrgan_sharpen else '0'
+    os.environ['HY3D_USE_SD_UPSCALE'] = '1' if (texture_sd_detail and not use_swift_paint) else '0'
 
     img = Image.open(image_path)
     if run_dir is None:
@@ -279,12 +300,20 @@ def generate(
         shape_backend=shape_backend,
         no_rembg=False,
         seed=seed,
-        paint_preset="2.0-turbo",
+        paint_preset="2.0" if use_swift_paint else "2.0-turbo",
         paint_model_repo=None,
         paint_subfolder=None,
-        paint_diffusion_backend="mlx",
+        paint_diffusion_backend="swift" if use_swift_paint else "mlx",
         paint_mlx_weights=None,
         paint_basic_texture=True,
+        paint_res=paint_res,
+        paint_steps=paint_steps,
+        paint_guidance=paint_guidance,
+        paint_tex=paint_tex,
+        paint_superres=paint_superres,
+        paint_sd_detail=texture_sd_detail if use_swift_paint else False,
+        paint_sd_strength=paint_sd_strength,
+        paint_sd_res=paint_sd_res,
     )
 
     progress(0.05, desc="Generating 3D shape...")
@@ -423,26 +452,37 @@ def _simplify_mesh(mesh, target_faces):
 
 
 # Presets differ in geometry detail, reduction target, and texture-detail
-# passes — the model (2.0-turbo) and steps (8, its distillation schedule)
-# are fixed. Delight and skip-texturing are off for every preset now.
-# target_faces for normal/high are calibrated from measured raw (post
-# fragment-filter, pre-simplification) face counts at each octree resolution
-# (96->61,172, 192->245,356, 256->436,076 on the same test input) — both
-# targets keep the same ~41% retention ratio, so "high" carries proportionally
-# more absolute detail than "normal" rather than an arbitrary round number.
+# passes — the shape model (2.0-turbo) and steps (8, its distillation
+# schedule) are fixed, and target_faces for normal/high are calibrated from
+# measured raw (post fragment-filter, pre-simplification) face counts at
+# each octree resolution (96->61,172, 192->245,356, 256->436,076 on the same
+# test input) — both targets keep the same ~41% retention ratio, so "high"
+# carries proportionally more absolute detail than "normal" rather than an
+# arbitrary round number. Delight and skip-texturing are off for every
+# preset. Paint now runs on the Swift native backend for every preset —
+# res/tex scale with how much the mesh's own poly budget can actually show
+# (e.g. lowpoly's 500-face mesh gets a small 256 atlas, not a wasted 2048
+# one); steps scale lowpoly->high for a real quality ladder; guidance is 1.5
+# for lowpoly/normal/high (2.0 measured harsher/oversaturated in an A/B, see
+# swift/README.md) but 2 for draft; upscale-texture (SD-Turbo per-view pass)
+# mirrors the old on/off split (off for lowpoly/draft, on for normal/high)
+# at strength 0.3, resolution 512. use_swift_paint/paint_superres/
+# paint_sd_strength/paint_sd_res are no longer user-adjustable in the UI
+# (backed by gr.State instead of visible sliders) but stay part of this
+# return tuple since presets still set them via the same outputs mechanism.
 # Returns: shape_steps, shape_octree_resolution, use_delight, simplify_before,
-# target_faces, skip_texturing, texture_sd_detail, texture_esrgan_sharpen
+# target_faces, skip_texturing, texture_sd_detail, use_swift_paint,
+# paint_res, paint_steps, paint_guidance, paint_tex, paint_superres,
+# paint_sd_strength, paint_sd_res
 def _set_preset(name):
     if name == "lowpoly":
-        return 8, 96, False, True, 500, False, False, False
+        return 8, 96, False, True, 500, False, False, True, 512, 4, 1.5, 256, False, 0.3, 512
     elif name == "draft":
-        # Same geometry as lowpoly, but unreduced — for inspecting the raw
-        # shape output before deciding on a reduction target.
-        return 8, 96, False, False, 500, False, False, False
+        return 8, 160, False, True, 50000, False, False, True, 384, 10, 2, 1024, False, 0.3, 512
     elif name == "normal":
-        return 8, 192, False, True, 100000, False, True, False
+        return 8, 192, False, True, 100000, False, True, True, 512, 15, 1.5, 2048, False, 0.3, 512
     else:  # high
-        return 8, 256, False, True, 180000, False, True, True
+        return 8, 256, False, True, 180000, False, True, True, 512, 20, 1.5, 2048, False, 0.3, 512
 
 
 
@@ -947,16 +987,24 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                     )
                     texture_sd_detail = gr.Checkbox(
                         value=False,
-                        label="SD Turbo detail pass",
+                        label="Upscale texture",
                         info="Light generative touch-up on each view before baking",
                     )
-                    texture_esrgan_sharpen = gr.Checkbox(
-                        value=False,
-                        label="ESRGAN sharpen pass",
-                        info="Cheap upscale/downsample cleanup, runs after SD Turbo",
-                    )
                     randomize_seed = gr.Checkbox(value=True, label="Randomize seed")
+
+                with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+                    paint_res = gr.Slider(minimum=256, maximum=1024, value=512, step=64, label="Paint Resolution")
+                    paint_steps = gr.Slider(minimum=1, maximum=30, value=15, step=1, label="Paint Steps")
+                    paint_tex = gr.Slider(minimum=256, maximum=4096, value=2048, step=256, label="Paint Texture Size")
                     retexture_btn = gr.Button("Re-texture", variant="primary", size="lg", elem_id="retexture-btn")
+                    # Hidden — no longer user-adjustable, but still preset-dependent (paint_guidance)
+                    # or fixed across all presets (the rest), so kept as plumbing rather than
+                    # hardcoded, since presets set these via the same outputs mechanism.
+                    use_swift_paint = gr.State(value=True)
+                    paint_guidance = gr.State(value=1.5)
+                    paint_superres = gr.State(value=False)
+                    paint_sd_strength = gr.State(value=0.3)
+                    paint_sd_res = gr.State(value=512)
 
             with gr.Column(scale=1):
                 current_mesh = gr.State()
@@ -966,7 +1014,9 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
 
         _preset_outputs = [
             shape_steps, shape_octree_resolution, use_delight, simplify_before,
-            target_faces, skip_texturing, texture_sd_detail, texture_esrgan_sharpen,
+            target_faces, skip_texturing, texture_sd_detail,
+            use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
+            paint_superres, paint_sd_strength, paint_sd_res,
         ]
         btn_lowpoly.click(fn=lambda: _set_preset("lowpoly"), outputs=_preset_outputs)
         btn_draft.click(fn=lambda: _set_preset("draft"), outputs=_preset_outputs)
@@ -985,7 +1035,14 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 target_faces,
                 skip_texturing,
                 texture_sd_detail,
-                texture_esrgan_sharpen,
+                use_swift_paint,
+                paint_res,
+                paint_steps,
+                paint_guidance,
+                paint_tex,
+                paint_superres,
+                paint_sd_strength,
+                paint_sd_res,
             ],
             outputs=[output_3d, output_file, output_obj, current_mesh],
         ).then(fn=_get_memory_stats, outputs=memory_label)
@@ -993,7 +1050,10 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
         def _retexture_current(
             glb_path, use_delight,
             seed, randomize_seed,
-            texture_sd_detail=False, texture_esrgan_sharpen=False,
+            texture_sd_detail=False,
+            use_swift_paint=False,
+            paint_res=512, paint_steps=15, paint_guidance=2.0, paint_tex=2048,
+            paint_superres=False, paint_sd_strength=0.3, paint_sd_res=768,
             progress=gr.Progress(),
         ):
             global _last_original_inputs
@@ -1002,7 +1062,9 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             return _run_retexture(
                 glb_path, _last_original_inputs, use_delight,
                 seed, randomize_seed,
-                texture_sd_detail, texture_esrgan_sharpen,
+                texture_sd_detail,
+                use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
+                paint_superres, paint_sd_strength, paint_sd_res,
                 progress=progress,
             )
 
@@ -1011,7 +1073,9 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             inputs=[
                 current_mesh, use_delight,
                 seed, randomize_seed,
-                texture_sd_detail, texture_esrgan_sharpen,
+                texture_sd_detail,
+                use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
+                paint_superres, paint_sd_strength, paint_sd_res,
             ],
             outputs=[output_3d, output_file, output_obj, current_mesh],
         ).then(fn=_get_memory_stats, outputs=memory_label)
@@ -1102,16 +1166,21 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                     )
                     texture_sd_detail_t2 = gr.Checkbox(
                         value=False,
-                        label="SD Turbo detail pass",
+                        label="Upscale texture",
                         info="Light generative touch-up on each view before baking",
                     )
-                    texture_esrgan_sharpen_t2 = gr.Checkbox(
-                        value=False,
-                        label="ESRGAN sharpen pass",
-                        info="Cheap upscale/downsample cleanup, runs after SD Turbo",
-                    )
                     randomize_seed_t2 = gr.Checkbox(value=True, label="Randomize seed")
+
+                with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+                    paint_res_t2 = gr.Slider(minimum=256, maximum=1024, value=512, step=64, label="Paint Resolution")
+                    paint_steps_t2 = gr.Slider(minimum=1, maximum=30, value=15, step=1, label="Paint Steps")
+                    paint_tex_t2 = gr.Slider(minimum=256, maximum=4096, value=2048, step=256, label="Paint Texture Size")
                     retexture_btn_t2 = gr.Button("Re-texture", variant="primary", size="lg", elem_id="retexture-btn-t2")
+                    use_swift_paint_t2 = gr.State(value=True)
+                    paint_guidance_t2 = gr.State(value=1.5)
+                    paint_superres_t2 = gr.State(value=False)
+                    paint_sd_strength_t2 = gr.State(value=0.3)
+                    paint_sd_res_t2 = gr.State(value=512)
 
             with gr.Column(scale=1):
                 current_mesh_t2 = gr.State()
@@ -1130,7 +1199,10 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             use_delight, seed, shape_steps, shape_octree_resolution,
             simplify_before_texturing,
             target_faces, skip_texturing=False,
-            texture_sd_detail=False, texture_esrgan_sharpen=False,
+            texture_sd_detail=False,
+            use_swift_paint=False,
+            paint_res=512, paint_steps=15, paint_guidance=2.0, paint_tex=2048,
+            paint_superres=False, paint_sd_strength=0.3, paint_sd_res=768,
             shape_backend=SHAPE_BACKEND_DEFAULT,
             progress=gr.Progress()
         ):
@@ -1142,7 +1214,9 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 str(img_path),
                 use_delight, seed, shape_steps, shape_octree_resolution,
                 simplify_before_texturing, target_faces, skip_texturing,
-                texture_sd_detail, texture_esrgan_sharpen,
+                texture_sd_detail,
+                use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
+                paint_superres, paint_sd_strength, paint_sd_res,
                 shape_backend=shape_backend, progress=progress,
             )
             return glb_path, glb_file, obj_zip, mesh_state
@@ -1159,7 +1233,14 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 target_faces_t2,
                 skip_texturing_t2,
                 texture_sd_detail_t2,
-                texture_esrgan_sharpen_t2,
+                use_swift_paint_t2,
+                paint_res_t2,
+                paint_steps_t2,
+                paint_guidance_t2,
+                paint_tex_t2,
+                paint_superres_t2,
+                paint_sd_strength_t2,
+                paint_sd_res_t2,
             ],
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label)
@@ -1167,7 +1248,10 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
         def _retexture_current_t2(
             glb_path, use_delight,
             seed, randomize_seed,
-            texture_sd_detail=False, texture_esrgan_sharpen=False,
+            texture_sd_detail=False,
+            use_swift_paint=False,
+            paint_res=512, paint_steps=15, paint_guidance=2.0, paint_tex=2048,
+            paint_superres=False, paint_sd_strength=0.3, paint_sd_res=768,
             progress=gr.Progress(),
         ):
             global _last_original_inputs
@@ -1176,7 +1260,9 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             return _run_retexture(
                 glb_path, _last_original_inputs, use_delight,
                 seed, randomize_seed,
-                texture_sd_detail, texture_esrgan_sharpen,
+                texture_sd_detail,
+                use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
+                paint_superres, paint_sd_strength, paint_sd_res,
                 progress=progress,
             )
 
@@ -1185,14 +1271,18 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             inputs=[
                 current_mesh_t2, use_delight_t2,
                 seed_t2, randomize_seed_t2,
-                texture_sd_detail_t2, texture_esrgan_sharpen_t2,
+                texture_sd_detail_t2,
+                use_swift_paint_t2, paint_res_t2, paint_steps_t2, paint_guidance_t2, paint_tex_t2,
+                paint_superres_t2, paint_sd_strength_t2, paint_sd_res_t2,
             ],
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label)
 
         _preset_outputs_t2 = [
             shape_steps_t2, shape_octree_resolution_t2, use_delight_t2, simplify_before_t2,
-            target_faces_t2, skip_texturing_t2, texture_sd_detail_t2, texture_esrgan_sharpen_t2,
+            target_faces_t2, skip_texturing_t2, texture_sd_detail_t2,
+            use_swift_paint_t2, paint_res_t2, paint_steps_t2, paint_guidance_t2, paint_tex_t2,
+            paint_superres_t2, paint_sd_strength_t2, paint_sd_res_t2,
         ]
         btn_lowpoly_t2.click(fn=lambda: _set_preset("lowpoly"), outputs=_preset_outputs_t2)
         btn_draft_t2.click(fn=lambda: _set_preset("draft"), outputs=_preset_outputs_t2)

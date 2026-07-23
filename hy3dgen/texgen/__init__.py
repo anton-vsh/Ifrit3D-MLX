@@ -13,15 +13,17 @@
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
 
-__all__ = ["Hunyuan3DPaintPipeline", "Hunyuan3DTexGenConfig"]
+__all__ = ["Hunyuan3DPaintPipeline", "Hunyuan3DTexGenConfig", "SwiftPaintPipeline"]
 
 
 def __getattr__(name):
     if name in __all__:
-        from .pipelines import Hunyuan3DPaintPipeline, Hunyuan3DTexGenConfig
+        from .pipelines import Hunyuan3DPaintPipeline, Hunyuan3DTexGenConfig, SwiftPaintPipeline
 
         if name == "Hunyuan3DPaintPipeline":
             return Hunyuan3DPaintPipeline
         if name == "Hunyuan3DTexGenConfig":
             return Hunyuan3DTexGenConfig
+        if name == "SwiftPaintPipeline":
+            return SwiftPaintPipeline
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

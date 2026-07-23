@@ -17,14 +17,16 @@ Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
 ---
 
-## Latest release: [v0.2.0](../../releases/tag/v0.2.0)
+## Latest release: [v0.3.0](../../releases/tag/v0.3.0)
 
-- **Shape generation now defaults to a native Swift/MLX backend** — ~28s per mesh, ~4x faster than the PyTorch fallback it still uses automatically if Swift isn't built locally.
-- **New Texture Detail passes** — optional ESRGAN sharpen + SD Turbo touch-up before baking.
-- **New presets** — Lowpoly / Draft / Normal / High, with reduction targets calibrated from measured face counts.
-- Several correctness fixes: duplicate background-removal loading, a stale reference-image cache leaking content between generations, and asymmetric eye color/shape from a blend-weighting bug.
+- **New native Swift/MLX paint backend** — the whole paint pipeline (UV unwrap, multiview render, diffusion, baking) now runs end-to-end in MLX for the RGB/"2.0" profile, avoiding the PyTorch↔MLX conversion overhead of the existing hybrid backend.
+- **Fixed real classifier-free-guidance and a 3D-RoPE multiview attention bug** that caused texture corruption on complex subjects (surfaced by an A/B against a sibling Swift-native app sharing the same checkpoint weights).
+- **New per-view "Upscale texture" pass** — an optional SD Turbo detail touch-up that round-trips through Swift's own renderer for the bake, avoiding cross-renderer depth/occlusion artifacts.
+- **ESRGAN sharpening removed entirely** — measured to reduce detail versus the SD Turbo pass alone.
+- **Redesigned presets** — Lowpoly / Draft / Normal / High now each tune their own paint resolution, steps, texture size, and CFG for a real quality ladder.
+- New paint controls (resolution, steps, texture size) exposed in the UI for direct testing.
 
-See the [full release notes](../../releases/tag/v0.2.0) for details.
+See the [full release notes](../../releases/tag/v0.3.0) for details.
 
 ---
 

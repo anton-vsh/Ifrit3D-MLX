@@ -109,6 +109,85 @@ class Hunyuan3DTexGenConfig:
         self.pipe_name = self.pipe_dict.get(subfolder_name, 'hunyuanpaint-turbo' if 'turbo' in subfolder_name else 'hunyuanpaint')
 
 
+class SwiftPaintPipeline:
+    """Drop-in alternative to Hunyuan3DPaintPipeline for the "2.0" (RGB,
+    non-PBR) profile: runs the whole paint pipeline (UV unwrap, multiview
+    render, diffusion, baking) via the native Swift/MLX `hy3d` binary
+    instead of this repo's own hybrid PyTorch+MLX pipeline. See
+    hy3dgen/texgen/utils/swift_paint_runner.py for why.
+    """
+
+    class _StubRender:
+        raster_mode = 'swift-native'
+
+    class _StubConfig:
+        device = 'mlx-swift'
+
+    def __init__(
+        self, weights_root: str, seed_model: str = 'rgb',
+        res: int = 512, steps: int = 15, guidance: float = 2.0, tex: int = 2048,
+        superres: bool = False,
+        sd_detail: bool = False, sd_strength: float = 0.3, sd_res: int = 768,
+    ):
+        self.weights_root = weights_root
+        self.model = seed_model
+        self.res = res
+        self.steps = steps
+        self.guidance = guidance
+        self.tex = tex
+        self.superres = superres
+        self.sd_detail = sd_detail
+        self.sd_strength = sd_strength
+        self.sd_res = sd_res
+        self.config = self._StubConfig()
+        self.render = self._StubRender()
+
+    @classmethod
+    def from_pretrained(
+        cls, model_path, subfolder='hunyuan3d-paint-v2-0',
+        res: int = 512, steps: int = 15, guidance: float = 2.0, tex: int = 2048,
+        superres: bool = False,
+        sd_detail: bool = False, sd_strength: float = 0.3, sd_res: int = 768,
+        **_ignored,
+    ):
+        if 'turbo' in subfolder or 'paintpbr' in subfolder or 'v2-1' in subfolder:
+            raise ValueError(
+                f"SwiftPaintPipeline only supports the non-turbo RGB profile "
+                f"(hunyuan3d-paint-v2-0), got subfolder={subfolder!r}"
+            )
+        original_model_path = model_path
+        if not os.path.exists(model_path):
+            base_dir = os.environ.get('HY3DGEN_MODELS', '~/.cache/hy3dgen')
+            model_path = os.path.expanduser(os.path.join(base_dir, model_path))
+            multiview_model_path = os.path.join(model_path, subfolder)
+            if not os.path.exists(multiview_model_path):
+                import huggingface_hub
+                model_path = huggingface_hub.snapshot_download(
+                    repo_id=original_model_path, allow_patterns=[f'{subfolder}/*']
+                )
+        return cls(
+            model_path, res=res, steps=steps, guidance=guidance, tex=tex,
+            superres=superres, sd_detail=sd_detail, sd_strength=sd_strength, sd_res=sd_res,
+        )
+
+    def __call__(self, mesh, image, seed=0, progress_callback=None):
+        from .utils.swift_paint_runner import run_swift_paint
+
+        if isinstance(image, List):
+            image = image[0]
+        if isinstance(image, str):
+            image = Image.open(image)
+        image = Hunyuan3DPaintPipeline.recenter_image(self, image)
+
+        return run_swift_paint(
+            mesh, image, self.weights_root,
+            model=self.model, seed=seed, progress_callback=progress_callback,
+            res=self.res, steps=self.steps, guidance=self.guidance, tex=self.tex,
+            superres=self.superres,
+            sd_detail=self.sd_detail, sd_strength=self.sd_strength, sd_res=self.sd_res,
+        )
+
+
 class Hunyuan3DPaintPipeline:
     @classmethod
     def from_pretrained(

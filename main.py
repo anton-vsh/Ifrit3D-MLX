@@ -147,16 +147,24 @@ _PAINT_CACHE_PIPELINE = None
 _PAINT_CACHE_LOCK = threading.Lock()
 
 
-def get_or_load_paint_pipeline(model_repo, subfolder, diffusion_backend, mlx_weights_path, pbr_albedo_only=False, progress_callback=None):
-    from hy3dgen.texgen import Hunyuan3DPaintPipeline
+def get_or_load_paint_pipeline(
+    model_repo, subfolder, diffusion_backend, mlx_weights_path, pbr_albedo_only=False,
+    swift_kwargs=None, progress_callback=None,
+):
+    from hy3dgen.texgen import Hunyuan3DPaintPipeline, SwiftPaintPipeline
     from hf_progress import report_hf_downloads
 
     global _PAINT_CACHE_KEY, _PAINT_CACHE_PIPELINE
+    swift_kwargs = swift_kwargs or {}
 
     # pbr_albedo_only must be part of the cache key: a full-PBR and an
     # albedo-only pipeline are structurally different loaded UNets, not just
-    # a runtime flag on an otherwise-identical pipeline.
-    key = (model_repo, subfolder, diffusion_backend, mlx_weights_path, pbr_albedo_only)
+    # a runtime flag on an otherwise-identical pipeline. swift_kwargs holds
+    # only cheap presentation params (res/steps/guidance/...) re-read on every
+    # call — no heavy state to invalidate — but it's still part of the key so
+    # a stale SwiftPaintPipeline object is never silently reused with old params.
+    key = (model_repo, subfolder, diffusion_backend, mlx_weights_path, pbr_albedo_only,
+           tuple(sorted(swift_kwargs.items())))
     with _PAINT_CACHE_LOCK:
         if _PAINT_CACHE_KEY != key:
             if _PAINT_CACHE_PIPELINE is not None:
@@ -171,13 +179,18 @@ def get_or_load_paint_pipeline(model_repo, subfolder, diffusion_backend, mlx_wei
                 gc.collect()
 
             with report_hf_downloads(progress_callback, f"Downloading paint model {model_repo}/{subfolder} (first run only)"):
-                _PAINT_CACHE_PIPELINE = Hunyuan3DPaintPipeline.from_pretrained(
-                    model_repo,
-                    subfolder=subfolder,
-                    diffusion_backend=diffusion_backend,
-                    mlx_weights_path=mlx_weights_path,
-                    pbr_albedo_only=pbr_albedo_only,
-                )
+                if diffusion_backend == 'swift':
+                    _PAINT_CACHE_PIPELINE = SwiftPaintPipeline.from_pretrained(
+                        model_repo, subfolder=subfolder, **swift_kwargs,
+                    )
+                else:
+                    _PAINT_CACHE_PIPELINE = Hunyuan3DPaintPipeline.from_pretrained(
+                        model_repo,
+                        subfolder=subfolder,
+                        diffusion_backend=diffusion_backend,
+                        mlx_weights_path=mlx_weights_path,
+                        pbr_albedo_only=pbr_albedo_only,
+                    )
             _PAINT_CACHE_KEY = key
 
         return _PAINT_CACHE_PIPELINE
@@ -190,9 +203,23 @@ def run_paint_pipeline(mesh, image_paths: List[Path], args, progress_callback=No
     images = load_pil_images(image_paths, use_rembg=not args.no_rembg)
     image_input = images if len(images) > 1 else images[0]
 
+    swift_kwargs = None
+    if args.paint_diffusion_backend == 'swift':
+        swift_kwargs = dict(
+            res=getattr(args, 'paint_res', 512),
+            steps=getattr(args, 'paint_steps', 15),
+            guidance=getattr(args, 'paint_guidance', 2.0),
+            tex=getattr(args, 'paint_tex', 2048),
+            superres=getattr(args, 'paint_superres', False),
+            sd_detail=getattr(args, 'paint_sd_detail', False),
+            sd_strength=getattr(args, 'paint_sd_strength', 0.3),
+            sd_res=getattr(args, 'paint_sd_res', 768),
+        )
+
     painter = get_or_load_paint_pipeline(
         model_repo, subfolder, args.paint_diffusion_backend, args.paint_mlx_weights,
         pbr_albedo_only=getattr(args, 'paint_basic_texture', False),
+        swift_kwargs=swift_kwargs,
         progress_callback=progress_callback,
     )
 
@@ -231,9 +258,10 @@ def add_paint_model_args(p):
     p.add_argument("--paint-subfolder", help="Override paint model subfolder")
     p.add_argument(
         "--paint-diffusion-backend",
-        choices=["pytorch", "mlx"],
+        choices=["pytorch", "mlx", "swift"],
         default="pytorch",
-        help="Diffusion UNet backend for paint: pytorch (default) or mlx (Apple Silicon)",
+        help="Diffusion UNet backend for paint: pytorch (default), mlx (Apple Silicon hybrid), "
+        "or swift (native MLX-Swift hy3d binary, RGB/\"2.0\" profile only, needs swift/bin/hy3d built)",
     )
     p.add_argument(
         "--paint-mlx-weights",
@@ -245,6 +273,14 @@ def add_paint_model_args(p):
         help="For the PBR (2.1) preset: skip metallic-roughness generation, roughly halving "
         "multiview diffusion time. No effect on other presets (they never generate mr).",
     )
+    p.add_argument("--paint-res", type=int, default=512, help="swift backend only: render resolution")
+    p.add_argument("--paint-steps", type=int, default=15, help="swift backend only: diffusion steps")
+    p.add_argument("--paint-guidance", type=float, default=2.0, help="swift backend only: CFG guidance scale")
+    p.add_argument("--paint-tex", type=int, default=2048, help="swift backend only: output texture atlas size")
+    p.add_argument("--paint-superres", action="store_true", help="swift backend only: enable native ESRGAN super-res")
+    p.add_argument("--paint-sd-detail", action="store_true", help="swift backend only: per-view SD-Turbo detail pass (dump/SD/bake round-trip)")
+    p.add_argument("--paint-sd-strength", type=float, default=0.3, help="swift backend only: SD-Turbo img2img strength")
+    p.add_argument("--paint-sd-res", type=int, default=768, help="swift backend only: SD-Turbo per-view resolution")
 
 
 def cmd_shape(args):
