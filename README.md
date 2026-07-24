@@ -29,37 +29,19 @@ See the [full release notes](../../releases/tag/v0.3.1) for details, and [v0.3.0
 
 ## What's new in Ifrit3D-MLX
 
-This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX) (CLI-only) and has grown into a full application on top of it:
+Based on [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX) (CLI-only) and has grown into a full application on top of it:
 
+- **Zero manual model setup** — shape, paint, delight, SD Turbo, and the CLIP subject classifier all download automatically from Hugging Face on first use and are cached locally — no manual checkpoint placement, no config editing, whether you're running the packaged app or from source.
+- **Standalone macOS app** — the same UI packaged as a double-clickable `.app`/`.dmg` with a menu bar helper (no Terminal window, no Dock icon). See [Releases](../../releases) for a prebuilt build, or `scripts/build_app.sh` to build your own.
 - **Gradio UI** (`app.py`) — Image-to-3D and Text-to-3D tabs, covering shape generation, texturing, polygon reduction, and upscaling without touching a terminal.
-- **Standalone macOS app** — the same UI packaged as a double-clickable `.app`/`.dmg` with a menu bar helper (no Terminal window, no Dock icon), model weights downloaded on first use into `~/Library/Application Support/`. See [Releases](../../releases) for a prebuilt build, or `scripts/build_app.sh` to build your own.
-- **Pipeline caching** — shape and paint pipelines stay loaded across generations instead of reloading from disk every run.
-- **Polygon reduction** — main feature. Inserts remesh step inside of the main pipeline resulting in cleaner mesh and correct lowpoly UV.
+- **Polygon reduction** — Inserts a remesh step inside the main pipeline, resulting in a cleaner mesh and correct lowpoly UV.
 - **Text to 3D** — image generation as the starting step. Instrumental in getting that Luma Genie look.
-- **FlashVDM volume decoder** — an optional faster decode path, with fragment filtering to clean up the mesh artifacts it can introduce.
-- **Multi-view shape input** — reconstruct from front + left + back images instead of a single photo, for shape models that support it.
 - **Re-texture with seed** — re-run just the texturing pass on an existing mesh with a new (or fixed) seed, without regenerating the shape.
-- **Swift/MLX shape backend** — shape generation defaults to a native Swift binary (~4x faster than PyTorch at the same settings), falling back to PyTorch automatically if not built locally.
-- **Texture Detail pass** — optional SD Turbo generative touch-up, applied before baking.
-- **Lowpoly / Draft / Normal / High presets** — one-click geometry + texture-detail combinations, calibrated from measured face counts rather than arbitrary numbers.
+- **Swift/MLX shape backend** — shape generation defaults to a native Swift binary (~4x faster than PyTorch at the same settings), with an in-process cache keeping it loaded across generations; falls back to PyTorch automatically if not built locally.
+- **Swift/MLX paint backend** — paint can also run end-to-end (UV unwrap through baking) on the same native Swift binary instead of the PyTorch/hybrid-MLX pipeline, avoiding per-step PyTorch↔MLX conversion overhead. Each generation currently runs as its own subprocess, so unlike the shape backend it reloads weights from disk every run rather than staying warm in memory.
+- **Upscale texture pass** — an optional latent generative touch-up applied per-view before baking.
+- **Lowpoly / Draft / Normal / High presets** — one-click combinations tuning geometry (reduction target, octree resolution) together with paint settings (resolution, steps, texture size, CFG), calibrated from measured face counts and A/B-tested settings rather than arbitrary numbers.
 - **Granular progress reporting** — per-diffusion-step progress in the UI instead of a single stalled bar for the whole shape or texture pass.
-
----
-
-## Supported Models (same as original Hunyuan3D-MLX)
-
-| Model | Type | MPS | MLX | MLX HF |
-| - | - | - | - | - |
-| hunyuan3d-dit-v2-mini | 🧱 Shape | ✅ | 🏗️ | |
-| hunyuan3d-dit-v2-mini-turbo | 🧱 Shape | ✅ | 🏗️ | |
-| hunyuan3d-dit-v2-0 | 🧱 Shape | ✅ | 🏗️ | |
-| hunyuan3d-dit-v2-0-turbo | 🧱 Shape | ✅ | 🏗️ | |
-| hunyuan3d-dit-v2-1 | 🧱 Shape | ✅ | 🏗️ | |
-| hunyuan3d-dit-v2-mv | 🧱 Shape | ✅ | 🏗️ | |
-| hunyuan3d-dit-v2-mv-turbo | 🧱 Shape | ✅ | 🏗️ | |
-| hunyuan3d-paint-v2-0 | 🎨 Paint | ✅ | ✅ | [zimengxiong/Hunyuan3D-2.0-Paint-MLX](https://huggingface.co/zimengxiong/Hunyuan3D-2.0-Paint-MLX) |
-| hunyuan3d-paint-v2-0-turbo | 🎨 Paint | ✅ | ✅ | [zimengxiong/Hunyuan3D-2.0-Paint-MLX](https://huggingface.co/zimengxiong/Hunyuan3D-2.0-Paint-MLX) |
-| hunyuan3d-paintpbr-v2-1 | 🎨 Paint | ✅ | 🏗️ | [zimengxiong/Hunyuan3D-2.1-Paint-MLX](https://huggingface.co/zimengxiong/Hunyuan3D-2.1-Paint-MLX) |
 
 ---
 
