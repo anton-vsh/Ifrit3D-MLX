@@ -47,6 +47,34 @@ together), and building a working one requires more than plain
 the rest of this project's build, so it's kept as a local, gitignored
 artifact rather than forcing every clone to build Swift from source.
 
+### Local modifications (patch, committed)
+
+Unlike the compiled binary, `swift/patches/0001-local-modifications.patch`
+*is* committed — it's the only durable record of the source changes behind
+the current `swift/bin/hy3d`, applied on top of a clean checkout of
+upstream's `main` branch:
+
+- `--dump-views <dir>` / `--bake-views <dir> --view-size N` CLI modes and
+  the corresponding `paintRGBRawViews`/`bakeRGBFromViews` pipeline methods
+  (the dump→SD-Turbo→bake round-trip the "Upscale texture" pass uses).
+- An experimental, currently-unused `--conf-thresh-deg` bake flag
+  (`confidenceCosThr` in `bakeMulti`) — tested against the "clean front,
+  hallucinated dark back" hallucination on low-information objects and
+  found not to help (the corruption isn't a grazing-angle sampling
+  artifact); left in as a harmless opt-in for future experiments, not
+  wired into the app.
+- **The seed-forwarding fix**: `hy3d paint`'s CLI parsed `--seed` but never
+  forwarded it into `paintRGB`/`paintRGBRawViews`/PBR's `run()`, each of
+  which reseeds internally from their own `seed: UInt64 = 0` default —
+  silently overriding whatever the CLI's global `MLXRandom.seed(...)` call
+  set. Every Swift-backend paint generation was actually always seeded at
+  0 regardless of the `--seed` value, so "re-texture with a new seed" was
+  a no-op. Fixed by threading the parsed seed through explicitly at each
+  call site.
+
+Regenerate the patch after making further source changes with:
+`cd /tmp/hy3d-swift-src && git diff > /Users/user/Hunyuan3D-MLX/swift/patches/0001-local-modifications.patch`
+
 ### Rebuilding it
 
 `swift build`/`swift run` alone cannot compile the Metal shaders
@@ -59,6 +87,7 @@ coverage):**
 ```bash
 git clone --branch main https://github.com/ZimengXiong/Hunyuan3D-MLX.git /tmp/hy3d-swift-src
 cd /tmp/hy3d-swift-src
+git apply /Users/user/Hunyuan3D-MLX/swift/patches/0001-local-modifications.patch
 xcodebuild -scheme hy3d -configuration Release -destination 'platform=macOS' build
 
 DERIVED=$(xcodebuild -scheme hy3d -showBuildSettings -configuration Release 2>/dev/null | awk -F'= ' '/ BUILT_PRODUCTS_DIR /{print $2; exit}')
@@ -89,6 +118,7 @@ clean, no instrumentation):**
 ```bash
 git clone --branch main https://github.com/ZimengXiong/Hunyuan3D-MLX.git /tmp/hy3d-swift-src
 cd /tmp/hy3d-swift-src
+git apply /Users/user/Hunyuan3D-MLX/swift/patches/0001-local-modifications.patch
 swift build -c release   # compiles fine, but the resulting binary can't run yet —
                           # it has no metallib (Metal shaders aren't compiled by plain swift build)
 

@@ -1,0 +1,342 @@
+diff --git a/Sources/HunyuanPaintMLX/MeshRender.swift b/Sources/HunyuanPaintMLX/MeshRender.swift
+index 7d38cc5..02331fc 100644
+--- a/Sources/HunyuanPaintMLX/MeshRender.swift
++++ b/Sources/HunyuanPaintMLX/MeshRender.swift
+@@ -169,11 +169,85 @@ public final class MeshRender {
+         return g00 * (1 - fr) * (1 - fc) + g01 * (1 - fr) * fc + g10 * fr * (1 - fc) + g11 * fr * fc
+     }
+ 
++    /// Sums `kernelSize` consecutive columns of a [H,W] array (edge-replicate padded).
++    /// Used as one pass of a separable box filter (see `depthEdgeReliability`).
++    private static func boxSumCols(_ a: MLXArray, kernelSize: Int) -> MLXArray {
++        guard kernelSize > 1 else { return a }
++        let W = a.dim(1), half = kernelSize / 2
++        let leftCol = a[0..., 0..<1], rightCol = a[0..., (W - 1)..<W]
++        let padded = concatenated(
++            Array(repeating: leftCol, count: half) + [a] + Array(repeating: rightCol, count: half), axis: 1)
++        var acc = MLX.zeros(a.shape)
++        for k in 0..<kernelSize { acc = acc + padded[0..., k..<(k + W)] }
++        return acc
++    }
++
++    /// Sums `kernelSize` consecutive rows of a [H,W] array (edge-replicate padded).
++    private static func boxSumRows(_ a: MLXArray, kernelSize: Int) -> MLXArray {
++        guard kernelSize > 1 else { return a }
++        let H = a.dim(0), half = kernelSize / 2
++        let topRow = a[0..<1, 0...], bottomRow = a[(H - 1)..<H, 0...]
++        let padded = concatenated(
++            Array(repeating: topRow, count: half) + [a] + Array(repeating: bottomRow, count: half), axis: 0)
++        var acc = MLX.zeros(a.shape)
++        for k in 0..<kernelSize { acc = acc + padded[k..<(k + H), 0...] }
++        return acc
++    }
++
++    /// Per-view seam-reliability field, port of mesh_render.py's Canny-based
++    /// `render_sketch_from_depth` + soft-taper (see `back_project`): OpenCV's
++    /// Canny isn't available in MLX, so depth discontinuities are found via a
++    /// simple gradient-magnitude threshold instead of true hysteresis edge
++    /// detection — a reasonable proxy for the same purpose (flagging depth
++    /// jumps at silhouette/crease edges, not tracing thin continuous lines).
++    /// The binary edge map is then box-filtered exactly like the Python
++    /// reference (separable sum over a `kernelSize`x`kernelSize` window,
++    /// divided by `kernelSize` — not squared — so reliability saturates to 0
++    /// once roughly one edge-line's worth of pixels falls in the window,
++    /// rather than requiring the whole window to be edge). Without this, a
++    /// view's blend weight can drop to zero abruptly right at a geometric
++    /// discontinuity (nose bridge, jaw edge), forcing the per-texel blend to
++    /// lean entirely on a different, independently-generated view right at
++    /// that edge — a visible hard seam with a lighting/color mismatch, worst
++    /// on high-curvature features.
++    private static func depthEdgeReliability(depthMap: MLXArray, covd: MLXArray, H: Int, Wd: Int) -> MLXArray {
++        let kernelSize = max(1, Int((2.0 / 512.0) * Float(max(H, Wd)))) * 2 + 1
++        let depth2d = depthMap.reshaped([H, Wd])
++        let cov2d = covd.reshaped([H, Wd]).asType(.float32)
++        let bigPos = MLXArray(Float(1e9)), bigNeg = MLXArray(Float(-1e9))
++        let dmax = MLX.where(cov2d .> 0, depth2d, bigNeg).max()
++        let dmin = MLX.where(cov2d .> 0, depth2d, bigPos).min()
++        let denom = MLX.maximum(dmax - dmin, MLXArray(Float(1e-6)))
++        let depthNorm = clip((depth2d - dmin) / denom, min: 0, max: 1) * cov2d
++
++        let Wd_ = Wd, H_ = H
++        let rightShift = concatenated([depthNorm[0..., 1..<Wd_], depthNorm[0..., (Wd_ - 1)..<Wd_]], axis: 1)
++        let dx = rightShift - depthNorm
++        let downShift = concatenated([depthNorm[1..<H_, 0...], depthNorm[(H_ - 1)..<H_, 0...]], axis: 0)
++        let dy = downShift - depthNorm
++        let gradMag = sqrt(dx * dx + dy * dy)
++        let edgeThreshold: Float = 0.06
++        let edge = (gradMag .> edgeThreshold).asType(.float32)
++
++        let dilated = boxSumRows(boxSumCols(edge, kernelSize: kernelSize), kernelSize: kernelSize)
++        let reliability = 1.0 - clip(dilated / Float(kernelSize), min: 0, max: 1)
++        return reliability.reshaped([H * Wd])
++    }
++
+     /// Back-sample (gather) bake of several color sets sharing one geometry pass.
+     /// viewSets: [set][view] = MLXArray [H,W,3]. Returns ([texture per set], covered mask).
+     public func bakeMulti(_ viewSets: [[MLXArray]], _ elevs: [Float], _ azims: [Float],
+-                          textureSize: Int, exp: Float = 6, weights: [Float]? = nil, eps: Float = 0.05)
++                          textureSize: Int, exp: Float = 6, weights: [Float]? = nil, eps: Float = 0.05,
++                          confidenceCosThr: Float? = nil)
+         -> (textures: [MLXArray], covered: MLXArray) {
++        // confidenceCosThr (experimental): when set, a texel only counts as
++        // "covered" if the BEST view that saw it hit it steeper than this
++        // cosine-of-incidence-angle threshold. Texels only ever seen at a
++        // grazing angle (typical of faces the reference photo never showed)
++        // fall through to `inpaint`'s existing EDT-nearest fill instead of
++        // baking in whatever noisy/hallucinated content that single weak
++        // view produced. nil preserves prior behavior exactly (any nonzero
++        // weight counts as covered).
+         let w = weights ?? [Float](repeating: 1, count: elevs.count)
+         let T = textureSize
+         let (texPos3, texNrm3, _) = uvRasterize(T)
+@@ -183,6 +257,7 @@ public final class MeshRender {
+         let nsets = viewSets.count
+         var accs = (0..<nsets).map { _ in MLX.zeros([K, 3]) }
+         var wsum = MLX.zeros([K, 1])
++        var maxVisCos = MLX.zeros([K, 1])
+         let cosThr = cos(75.0 * Float.pi / 180)
+         let proj = MLXArray(projM, [4, 4])
+         let vertPosw = concatenated([vtxPos, ones([vtxPos.dim(0), 1])], axis: 1)
+@@ -206,20 +281,28 @@ public final class MeshRender {
+             let flat = ri * Int32(Wd) + ci
+             let covAt = take(covd, flat, axis: 0)
+             let depthAt = take(depthMap, flat, axis: 0)
+-            let vis = (inside .&& covAt .&& (abs(zc - depthAt) .< eps)).asType(.float32)
++            let edgeReliability = MeshRender.depthEdgeReliability(depthMap: depthMap, covd: covd, H: H, Wd: Wd)
++            let relAt = take(edgeReliability, flat, axis: 0)
++            let vis = (inside .&& covAt .&& (abs(zc - depthAt) .< eps)).asType(.float32) * relAt
+             let camN = matmul(Nn, mv[0..<3, 0..<3].transposed(1, 0))
+             let nrm = sqrt(sum(camN * camN, axis: 1))
+             let cosv = -camN[0..., 2] / clip(nrm, min: 1e-8, max: Float.greatestFiniteMagnitude)
+             let cosw = MLX.where(cosv .>= cosThr, pow(clip(cosv, min: 0, max: Float.greatestFiniteMagnitude), exp), MLXArray(Float(0))) * w[vi]
+             let wgt = (vis * cosw).reshaped([K, 1])
+             wsum = wsum + wgt
++            let visCos = (vis * cosv).reshaped([K, 1])
++            maxVisCos = MLX.maximum(maxVisCos, visCos)
+             let rfc = clip(rowF, min: 0, max: Float(H - 1)), cfc = clip(colF, min: 0, max: Float(Wd - 1))
+             for si in 0..<nsets { accs[si] = accs[si] + MeshRender.bilinear(viewSets[si][vi], rfc, cfc) * wgt }
+         }
+         let wsafe = clip(wsum, min: 1e-8, max: Float.greatestFiniteMagnitude)
+-        let covered = (wsum[0..., 0] .> 1e-8).reshaped([T, T])
++        var covered = (wsum[0..., 0] .> 1e-8)
++        if let thr = confidenceCosThr {
++            covered = covered .&& (maxVisCos[0..., 0] .> thr)
++        }
++        let coveredT = covered.reshaped([T, T])
+         let texs = accs.map { ($0 / wsafe).reshaped([T, T, 3]) }
+-        return (texs, covered)
++        return (texs, coveredT)
+     }
+ 
+     /// Fill un-painted texels; matches the Python reference exactly (see `Inpaint`):
+diff --git a/Sources/HunyuanPaintMLX/Pipeline.swift b/Sources/HunyuanPaintMLX/Pipeline.swift
+index b513ee8..3005a4e 100644
+--- a/Sources/HunyuanPaintMLX/Pipeline.swift
++++ b/Sources/HunyuanPaintMLX/Pipeline.swift
+@@ -33,6 +33,20 @@ public struct PaintResult {
+     public let albedoPNG: Data     // baked base-color texture as PNG bytes
+ }
+ 
++/// Result of `paintRGBRawViews`: unwrapped geometry plus the N raw (pre-superres,
++/// pre-bake) decoded view images, in the same order/order-count as `elevs`/`azims`
++/// (currently [0,0,0,0,90,-90] elev / [0,90,180,270,0,180] azim, weights
++/// [1,0.1,0.5,0.1,0.05,0.05] — identical to this repo's own Python-side
++/// candidate_camera_elevs/azims/view_weights, so a caller baking these views with
++/// its own renderer at the same elev/azim values gets a geometrically consistent
++/// result).
++public struct RawViewsResult {
++    public let vertices: [Float]
++    public let faces: [UInt32]
++    public let uvs: [Float]
++    public let viewPNGs: [Data]
++}
++
+ /// PBR paint result: same geometry contract as `PaintResult`, plus the second baked map.
+ /// `metallicRoughnessPNG` uses the glTF channel packing the model produces: G = roughness,
+ /// B = metallic (R unused). Feed both PNGs to `writeGLB` or the app's own serializer.
+@@ -108,11 +122,11 @@ public final class PaintPipeline {
+     /// core is shared with the app entry point; this only loads the mesh, writes the debug
+     /// texture PNGs next to the output, and serializes the GLB.
+     public func run(meshPath: String, imagePath: String, outGLB: String,
+-                    guidance: Float = 3.0) throws {
++                    guidance: Float = 3.0, seed: UInt64 = 0) throws {
+         let t0 = Date()
+         func log(_ s: String) { print("[pipeline] \(s)  (\(Int(-t0.timeIntervalSinceNow))s)") }
+         let mesh = loadMesh(meshPath)
+-        guard let r = try paintPBR(mesh: mesh, imagePath: imagePath, guidance: guidance,
++        guard let r = try paintPBR(mesh: mesh, imagePath: imagePath, guidance: guidance, seed: seed,
+                                    debugPathPrefix: outGLB,
+                                    onProgress: { s, _ in log(s) }) else { return }
+         // debug: the baked textures next to the GLB (same bytes that get embedded)
+@@ -194,6 +208,94 @@ public final class PaintPipeline {
+         return PaintResult(vertices: V, faces: uw.indices, uvs: uvOut, albedoPNG: albedoPNG)
+     }
+ 
++    /// Same as `paintRGB` through diffusion + decode, but stops there instead of
++    /// super-resolving/baking — returns the unwrapped geometry and the N raw
++    /// per-view PNGs so a caller can run its own per-view post-process (e.g. a
++    /// generative detail pass) before baking itself, exactly where the reference
++    /// PyTorch pipeline runs that kind of pass.
++    public func paintRGBRawViews(mesh: LoadedMesh, imagePath: String, guidance: Float = 2.0,
++                                 seed: UInt64 = 0,
++                                 onProgress: ((String, Float) -> Void)? = nil) throws -> RawViewsResult? {
++        onProgress?("Loading paint model", 0.02)
++        let (vae, wrap, _, gen) = try loadRGB()   // srModel intentionally unused: views here are pre-superres by design
++
++        onProgress?("Unwrapping UVs", 0.05)
++        guard let uw = xatlasUnwrap(vertices: mesh.vertices, vertexCount: mesh.vertexCount,
++                                    faces: mesh.faces, faceCount: mesh.faceCount) else { return nil }
++        var V = [Float](repeating: 0, count: uw.vertexCount * 3)
++        for i in 0..<uw.vertexCount { let o = Int(uw.vmapping[i]) * 3; V[i*3] = mesh.vertices[o]; V[i*3+1] = mesh.vertices[o+1]; V[i*3+2] = mesh.vertices[o+2] }
++
++        onProgress?("Rendering control maps", 0.1)
++        let R = MeshRender(); R.loadMesh(V, uw.indices); R.setUV(uw.uvs, flipV: true)
++        let ctrl = zip(elevs, azims).map { R.renderControl($0.0, $0.1, res) }
++        let normals = ctrl.map { $0.0 }, positions = ctrl.map { $0.1 }
++        func enc(_ imgs: [MLXArray]) -> MLXArray { vae.encodeMean(stacked(imgs) * 2 - 1) * sf }
++        let normalLat = enc(normals).expandedDimensions(axis: 0)
++        let positionLat = enc(positions).expandedDimensions(axis: 0)
++        let refLat = enc([prepRGB(imagePath, res)]).expandedDimensions(axis: 0)
++        let N = elevs.count, h = res / 8
++
++        let (sig, ts) = uniPCSchedule(steps)
++        let sched = UniPCScheduler(sigmas: sig, timesteps: ts)
++        MLXRandom.seed(seed)
++        var latents = MLXRandom.normal([1, N, h, h, 4])
++        let ced = wrap.prepare(refLat: refLat)
++        let neg = zeros(gen.shape)
++        let camGen = (0..<N).map { Int32($0) }
++        for (i, t) in ts.enumerated() {
++            let tArr = MLXArray(Array(repeating: Float(t), count: N))
++            let vc = wrap.predict(latents, tArr, text: gen, normalLat: normalLat, positionLat: positionLat, camGen: camGen, ced: ced, mvaScale: 1, refScale: 1)
++            let vu = wrap.predict(latents, tArr, text: neg, normalLat: normalLat, positionLat: positionLat, camGen: camGen, ced: nil, mvaScale: 1, refScale: 0)
++            latents = sched.step(vu + guidance * (vc - vu), t, latents); eval(latents)
++            onProgress?("Painting (\(i+1)/\(steps))", 0.15 + 0.6 * Float(i + 1) / Float(steps))
++            MLX.Memory.clearCache()
++        }
++
++        onProgress?("Decoding views", 0.8)
++        let dd = clip((vae.decode(latents[0] / sf) + 1) / 2, min: 0, max: 1)
++        let views = (0..<N).map { dd[$0] }
++        let viewPNGs = views.compactMap { pngData($0) }
++        guard viewPNGs.count == N else { return nil }
++        var uvOut = uw.uvs
++        for i in 0..<(uvOut.count / 2) { uvOut[i*2+1] = 1 - uvOut[i*2+1] }
++        onProgress?("Done", 1.0)
++        return RawViewsResult(vertices: V, faces: uw.indices, uvs: uvOut, viewPNGs: viewPNGs)
++    }
++
++    /// Bake a set of externally-provided per-view PNGs onto `mesh` using Swift's
++    /// own renderer, and return the textured result. Companion to
++    /// `paintRGBRawViews`: a caller dumps raw views, post-processes them
++    /// (e.g. a per-view generative detail pass in Python), then hands them back
++    /// here so the SAME renderer that determined visibility does the bake —
++    /// avoiding the depth/occlusion inconsistencies of baking one renderer's
++    /// views with a different renderer. `viewPaths` must be in the canonical
++    /// elev/azim order ([0,0,0,0,90,-90] / [0,90,180,270,0,180]); `viewSize`
++    /// is the (square) side length the provided views are loaded at.
++    public func bakeRGBFromViews(mesh: LoadedMesh, viewPaths: [String], viewSize: Int,
++                                 confThresh: Float? = nil,
++                                 onProgress: ((String, Float) -> Void)? = nil) throws -> PaintResult? {
++        guard viewPaths.count == elevs.count else { return nil }
++        onProgress?("Unwrapping UVs", 0.1)
++        guard let uw = xatlasUnwrap(vertices: mesh.vertices, vertexCount: mesh.vertexCount,
++                                    faces: mesh.faces, faceCount: mesh.faceCount) else { return nil }
++        var V = [Float](repeating: 0, count: uw.vertexCount * 3)
++        for i in 0..<uw.vertexCount { let o = Int(uw.vmapping[i]) * 3; V[i*3] = mesh.vertices[o]; V[i*3+1] = mesh.vertices[o+1]; V[i*3+2] = mesh.vertices[o+2] }
++        let R = MeshRender(); R.loadMesh(V, uw.indices); R.setUV(uw.uvs, flipV: true)
++
++        onProgress?("Loading views", 0.4)
++        let views = viewPaths.map { prepRGB($0, viewSize) }
++
++        onProgress?("Baking texture", 0.7)
++        let (texs, covered) = R.bakeMulti([views], elevs, azims, textureSize: tex, weights: vw,
++                                          confidenceCosThr: confThresh)
++        let texC = MeshRender.inpaint(texs[0], covered); eval(texC)
++        guard let albedoPNG = pngData(texC) else { return nil }
++        var uvOut = uw.uvs
++        for i in 0..<(uvOut.count / 2) { uvOut[i*2+1] = 1 - uvOut[i*2+1] }
++        onProgress?("Done", 1.0)
++        return PaintResult(vertices: V, faces: uw.indices, uvs: uvOut, albedoPNG: albedoPNG)
++    }
++
+     /// 2.1 PBR paint: geometry + reference image → unwrapped geometry + baked albedo and
+     /// metallic-roughness textures. Same contract as `paintRGB`: polls `isCancelled` (returns
+     /// nil if it fires), streams decoded albedo view grids via `onViews`, reports stages via
+diff --git a/Sources/hy3d/Paint.swift b/Sources/hy3d/Paint.swift
+index ad0fc25..b25f344 100644
+--- a/Sources/hy3d/Paint.swift
++++ b/Sources/hy3d/Paint.swift
+@@ -17,18 +17,69 @@ func cmdPaint(_ args: Args) throws {
+     let steps = args.int("steps") ?? 15
+     let tex = args.int("tex") ?? (model == "pbr" ? 4096 : 2048)
+     let superRes = !args.flag("no-superres")
+-    if let seed = args.int("seed") { MLXRandom.seed(UInt64(seed)) }   // see note in `hy3d help`
++    let guidance = args.float("guidance") ?? 2.0
++    // paintRGB/paintRGBRawViews reseed internally from their own `seed:` param
++    // (default 0) rather than trusting external global RNG state, so setting
++    // the global seed here alone is a no-op unless the value is also forwarded
++    // explicitly at the call site below.
++    let seedVal = UInt64(args.int("seed") ?? 0)
++    MLXRandom.seed(seedVal)
+ 
+     let pipe = PaintPipeline(weightsRoot: weights, res: res, steps: steps, tex: tex, superRes: superRes)
+     print("paint (\(model)): mesh=\(meshPath) image=\(imagePath) res=\(res) steps=\(steps) tex=\(tex) super-res=\(superRes)")
++
++    if let bakeDir = args.str("bake-views") {
++        guard model == "rgb" else { throw CLIError("paint: --bake-views only supports --model rgb") }
++        let lm = loadMesh(meshPath)
++        guard lm.vertexCount > 0 else { throw CLIError("paint: failed to load mesh \(meshPath)") }
++        let viewSize = args.int("view-size") ?? 768
++        // Experimental: texels only seen at a grazing angle (> this many
++        // degrees off the surface normal) are treated as uncovered and left
++        // to `inpaint`'s EDT-nearest fill, instead of baking in whatever a
++        // single weak/grazing view produced. Omit the flag to keep old behavior.
++        let confThresh: Float? = args.float("conf-thresh-deg").map { cos($0 * Float.pi / 180) }
++        let viewPaths = (0..<6).map { "\(bakeDir)/view_\($0).png" }
++        for p in viewPaths where !FileManager.default.fileExists(atPath: p) {
++            throw CLIError("paint: --bake-views missing \(p)")
++        }
++        guard let r = try pipe.bakeRGBFromViews(mesh: lm, viewPaths: viewPaths, viewSize: viewSize,
++                                                confThresh: confThresh,
++                                                onProgress: { s, f in
++            print(String(format: "  [%3.0f%%] %@", f * 100, s))
++        }) else { throw CLIError("paint: bake-views returned no result (UV unwrap failed?)") }
++        try writeGLB(path: out, vertices: r.vertices, faces: r.faces, uvs: r.uvs,
++                     baseColorPNG: r.albedoPNG, metallicRoughnessPNG: nil)
++        print("paint: wrote \(out)")
++        return
++    }
++
++    if let dumpDir = args.str("dump-views") {
++        guard model == "rgb" else { throw CLIError("paint: --dump-views only supports --model rgb") }
++        let lm = loadMesh(meshPath)
++        guard lm.vertexCount > 0 else { throw CLIError("paint: failed to load mesh \(meshPath)") }
++        guard let r = try pipe.paintRGBRawViews(mesh: lm, imagePath: imagePath, guidance: guidance, seed: seedVal, onProgress: { s, f in
++            print(String(format: "  [%3.0f%%] %@", f * 100, s))
++        }) else { throw CLIError("paint: raw-views pipeline returned no result (UV unwrap failed?)") }
++        try FileManager.default.createDirectory(atPath: dumpDir, withIntermediateDirectories: true)
++        // Any valid PNG works as the placeholder baseColorTexture here — the
++        // caller overwrites it with its own baked texture; only geometry/UVs matter.
++        try writeGLB(path: "\(dumpDir)/mesh.glb", vertices: r.vertices, faces: r.faces, uvs: r.uvs,
++                     baseColorPNG: r.viewPNGs[0], metallicRoughnessPNG: nil)
++        for (i, png) in r.viewPNGs.enumerated() {
++            try png.write(to: URL(fileURLWithPath: "\(dumpDir)/view_\(i).png"))
++        }
++        print("paint: wrote \(r.viewPNGs.count) raw views + mesh.glb to \(dumpDir)")
++        return
++    }
++
+     switch model {
+     case "pbr":
+-        try pipe.run(meshPath: meshPath, imagePath: imagePath, outGLB: out)
++        try pipe.run(meshPath: meshPath, imagePath: imagePath, outGLB: out, guidance: guidance, seed: seedVal)
+         print("paint: wrote \(out)")
+     case "rgb":
+         let lm = loadMesh(meshPath)
+         guard lm.vertexCount > 0 else { throw CLIError("paint: failed to load mesh \(meshPath)") }
+-        guard let r = try pipe.paintRGB(mesh: lm, imagePath: imagePath, onProgress: { s, f in
++        guard let r = try pipe.paintRGB(mesh: lm, imagePath: imagePath, guidance: guidance, seed: seedVal, onProgress: { s, f in
+             print(String(format: "  [%3.0f%%] %@", f * 100, s))
+         }) else { throw CLIError("paint: RGB pipeline returned no result (UV unwrap failed?)") }
+         try writeGLB(path: out, vertices: r.vertices, faces: r.faces, uvs: r.uvs,
