@@ -25,7 +25,6 @@ from typing import List, Union, Optional
 from .differentiable_renderer.mesh_render import MeshRender
 from .utils.dehighlight_utils import Light_Shadow_Remover
 from .utils.multiview_utils import Multiview_Diffusion_Net
-from .utils.realesrgan_utils import RealESRGAN_Upscaler
 from .utils.sdturbo_upscale_utils import SDTurboUpscaler
 from .utils.uv_warp_utils import mesh_uv_wrap
 
@@ -73,15 +72,12 @@ class Hunyuan3DTexGenConfig:
 
         self.render_size = 1024
         self.texture_size = 1024
-        # Two independent, chainable texture-detail passes applied to each
-        # generated view before baking (see __call__): SD Turbo first (a
-        # light, ~2-real-step generative touch-up — full-strength/step-count
-        # regeneration was tested and made the eye-asymmetry problem worse
-        # and the output blurrier, not better), then RealESRGAN (a cheap
-        # upscale-then-downsample-back-to-1024 pass used purely as a
-        # sharpen/cleanup filter, not for resolution gain — both target the
-        # same 1024 texture_size, not the 2048 tested earlier, since that
-        # alone didn't look meaningfully better and cost more).
+        # SD Turbo detail pass applied to each generated view before baking
+        # (see __call__): a light, ~2-real-step generative touch-up — full-
+        # strength/step-count regeneration was tested and made the
+        # eye-asymmetry problem worse and the output blurrier, not better.
+        # Targets the 1024 texture_size, not the 2048 tested earlier, since
+        # that alone didn't look meaningfully better and cost more.
         # Read fresh per-call in __call__ (like HY3D_USE_DELIGHT), not baked
         # in here: self.config is part of a pipeline cached and reused across
         # generations (main.py's _PAINT_CACHE_PIPELINE) whenever the model/
@@ -351,7 +347,6 @@ class Hunyuan3DPaintPipeline:
         # Both opt-in and kept lazy like the delight model rather than loaded
         # on every startup.
         self.models['sd_upscale_model'] = None
-        self.models['esrgan_upscale_model'] = None
         self.models['subject_classifier'] = None
 
     def _get_subject_classifier(self):
@@ -369,11 +364,6 @@ class Hunyuan3DPaintPipeline:
         if self.models['sd_upscale_model'] is None:
             self.models['sd_upscale_model'] = SDTurboUpscaler(self.config, progress_callback=progress_callback)
         return self.models['sd_upscale_model']
-
-    def _get_esrgan_upscale_model(self, progress_callback=None):
-        if self.models['esrgan_upscale_model'] is None:
-            self.models['esrgan_upscale_model'] = RealESRGAN_Upscaler(self.config, progress_callback=progress_callback)
-        return self.models['esrgan_upscale_model']
 
     def enable_model_cpu_offload(self, gpu_id: Optional[int] = None, device: Union[torch.device, str] = "cuda"):
         if self.models['delight_model'] is not None:
@@ -426,41 +416,16 @@ class Hunyuan3DPaintPipeline:
         return texture
 
     def _despeckle_texture(self, texture):
-        # Baking 512px diffusion views into a larger atlas leaves texels with
-        # near-zero sample weight that pass the bake's trust threshold yet
-        # carry no real color — they render as isolated flecks. Two variants,
-        # both replaced with the local 5x5 median color: dark flecks (near-
-        # black vs. local luminance median; verified 94% reduction on a real
-        # afflicted texture, smooth/detailed regions untouched) and chromatic
-        # flecks (a wrong-hued speck that isn't necessarily darker — e.g.
-        # blue/teal specks on an otherwise white/cream surface — which the
-        # dark-only check misses entirely). Median filtering is edge-
-        # preserving for genuine color boundaries (a pixel right at a real
-        # edge still matches its own side's local-majority color, so the
-        # diff stays small there), so this cleans isolated outlier texels
-        # without blurring real detail.
-        from scipy.ndimage import median_filter
+        # See utils/despeckle_utils.py for the algorithm (shared with the
+        # Swift paint backend via swift_paint_runner.py).
+        from .utils.despeckle_utils import despeckle_array
 
         arr = (texture.cpu().numpy() * 255.0).astype(np.float32)
-        lum = arr.mean(axis=2)
-        med_lum = median_filter(lum, size=5)
-        med_rgb = np.stack(
-            [median_filter(arr[:, :, c], size=5) for c in range(arr.shape[2])],
-            axis=2,
-        )
-        dark_mask = (med_lum - lum) > 45
-        chroma_dist = np.sqrt(((arr - med_rgb) ** 2).sum(axis=2))
-        chroma_mask = chroma_dist > 70
-        fleck_mask = dark_mask | chroma_mask
-        n = int(fleck_mask.sum())
+        cleaned, n = despeckle_array(arr)
         if n == 0:
             return texture
-        arr[fleck_mask] = med_rgb[fleck_mask]
-        logger.debug(
-            f"Despeckle: replaced {n} fleck texels "
-            f"({int(dark_mask.sum())} dark, {int(chroma_mask.sum())} chromatic)"
-        )
-        return torch.tensor(arr / 255.0).float().to(texture.device)
+        logger.debug(f"Despeckle: replaced {n} fleck texels")
+        return torch.tensor(cleaned / 255.0).float().to(texture.device)
 
     def recenter_image(self, image, border_ratio=0.2):
         if image.mode == 'RGB':
@@ -592,20 +557,9 @@ class Hunyuan3DPaintPipeline:
 
         # multiviews are native view_size (512) from the diffusion model —
         # the real content ceiling for texture detail, since Texture Size only
-        # resamples this fixed content into the UV atlas. Two optional,
-        # chainable passes here before baking can add real detail rather than
-        # just resampling it: ESRGAN (cheap sharpen) runs first, then SD Turbo
-        # (light generative touch-up) — A/B tested against the reverse order;
-        # this order gave SD Turbo's low-strength pass a cleaner starting
-        # point and came out visibly sharper (e.g. eyebrow hair strands
-        # stayed distinct instead of smudging).
-        if os.environ.get('HY3D_USE_ESRGAN_UPSCALE', '0') == '1':
-            if progress_callback is not None:
-                progress_callback(0.85, "ESRGAN sharpen pass...")
-            esrgan_model = self._get_esrgan_upscale_model(progress_callback=_scaled_progress(progress_callback, 0.85, 0.86))
-            for i in range(len(multiviews)):
-                multiviews[i] = esrgan_model(multiviews[i])
-
+        # resamples this fixed content into the UV atlas. This optional
+        # pass before baking can add real detail rather than just
+        # resampling it.
         if os.environ.get('HY3D_USE_SD_UPSCALE', '0') == '1':
             if progress_callback is not None:
                 progress_callback(0.86, "SD Turbo detail pass...")

@@ -46,6 +46,25 @@ def swift_paint_available() -> bool:
     return SWIFT_BIN.exists()
 
 
+def _despeckle_result(mesh):
+    """Apply the shared despeckle pass (see despeckle_utils.py) to the baked
+    texture Swift just produced — the hybrid PyTorch pipeline already runs
+    this after its own bake, but Swift's bake had no equivalent post-process."""
+    import numpy as np
+    from PIL import Image as PILImage
+    from .despeckle_utils import despeckle_array
+
+    material = getattr(mesh.visual, "material", None)
+    tex = getattr(material, "baseColorTexture", None) if material is not None else None
+    if tex is not None:
+        arr = np.asarray(tex.convert("RGB")).astype(np.float32)
+        cleaned, n = despeckle_array(arr)
+        print(f"despeckle: replaced {n} fleck texels")
+        if n > 0:
+            material.baseColorTexture = PILImage.fromarray(np.clip(cleaned, 0, 255).astype(np.uint8))
+    return mesh
+
+
 def _run_swift(cmd, stage_label: str, progress_callback=None, progress_range=(0.0, 1.0)):
     """Runs an `hy3d` subprocess, forwarding its `[ NN%] stage` progress lines
     (rescaled into `progress_range`) through `progress_callback`."""
@@ -155,7 +174,7 @@ def run_swift_paint(
             elapsed = _run_swift(cmd, "Swift paint", progress_callback)
             print("paint_backend_impl=swift")
             print(f"paint_time_swift={elapsed:.1f}s")
-            return trimesh.load(str(out_path), force="mesh")
+            return _despeckle_result(trimesh.load(str(out_path), force="mesh"))
 
         # --- sd_detail: dump raw views, SD-Turbo each in Python, bake in Swift ---
         dump_dir = tmp_path / "dump"
@@ -211,4 +230,4 @@ def run_swift_paint(
 
         print("paint_backend_impl=swift+sdturbo")
         print(f"paint_time_swift_dump={t_dump:.1f}s paint_time_sdturbo={t_sd:.1f}s paint_time_swift_bake={t_bake:.1f}s")
-        return trimesh.load(str(out_path), force="mesh")
+        return _despeckle_result(trimesh.load(str(out_path), force="mesh"))

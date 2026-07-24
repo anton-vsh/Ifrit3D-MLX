@@ -17,16 +17,13 @@ Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
 ---
 
-## Latest release: [v0.3.0](../../releases/tag/v0.3.0)
+## Latest release: [v0.3.1](../../releases/tag/v0.3.1)
 
-- **New native Swift/MLX paint backend** — the whole paint pipeline (UV unwrap, multiview render, diffusion, baking) now runs end-to-end in MLX for the RGB/"2.0" profile, avoiding the PyTorch↔MLX conversion overhead of the existing hybrid backend.
-- **Fixed real classifier-free-guidance and a 3D-RoPE multiview attention bug** that caused texture corruption on complex subjects (surfaced by an A/B against a sibling Swift-native app sharing the same checkpoint weights).
-- **New per-view "Upscale texture" pass** — an optional SD Turbo detail touch-up that round-trips through Swift's own renderer for the bake, avoiding cross-renderer depth/occlusion artifacts.
-- **ESRGAN sharpening removed entirely** — measured to reduce detail versus the SD Turbo pass alone.
-- **Redesigned presets** — Lowpoly / Draft / Normal / High now each tune their own paint resolution, steps, texture size, and CFG for a real quality ladder.
-- New paint controls (resolution, steps, texture size) exposed in the UI for direct testing.
+- **Fixed re-texture-with-a-new-seed silently doing nothing on the Swift paint backend** — the CLI parsed `--seed` but never forwarded it into the diffusion call, so every Swift-backend generation (RGB and PBR) was actually always seeded at 0 regardless of what was requested.
+- **Ported the texture despeckle filter to the Swift paint backend** — the median-filter cleanup for isolated dark/chromatic bake-texel flecks previously only ran on the old PyTorch/hybrid pipeline; it's now applied to Swift's output too.
+- **Removed ESRGAN entirely** (dead code since the UI checkbox that enabled it was removed) along with its 64MB weight file.
 
-See the [full release notes](../../releases/tag/v0.3.0) for details.
+See the [full release notes](../../releases/tag/v0.3.1) for details, and [v0.3.0's notes](../../releases/tag/v0.3.0) for the native Swift/MLX paint backend, CFG/RoPE fix, and redesigned presets.
 
 ---
 
@@ -43,7 +40,7 @@ This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/Zimeng
 - **Multi-view shape input** — reconstruct from front + left + back images instead of a single photo, for shape models that support it.
 - **Re-texture with seed** — re-run just the texturing pass on an existing mesh with a new (or fixed) seed, without regenerating the shape.
 - **Swift/MLX shape backend** — shape generation defaults to a native Swift binary (~4x faster than PyTorch at the same settings), falling back to PyTorch automatically if not built locally.
-- **Texture Detail passes** — optional ESRGAN sharpen and SD Turbo generative touch-up passes, applied before baking.
+- **Texture Detail pass** — optional SD Turbo generative touch-up, applied before baking.
 - **Lowpoly / Draft / Normal / High presets** — one-click geometry + texture-detail combinations, calibrated from measured face counts rather than arbitrary numbers.
 - **Granular progress reporting** — per-diffusion-step progress in the UI instead of a single stalled bar for the whole shape or texture pass.
 
@@ -78,7 +75,7 @@ This started as a clone of [ZimengXiong/Hunyuan3D-MLX](https://github.com/Zimeng
 
 This project builds upon the work of:
 
-- [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX) — the original CLI this project forked from, and also the source of the vendored Swift/MLX shape backend (their newer Swift `main` branch — see [`swift/README.md`](swift/README.md))
+- [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX) — the original CLI this project forked from, and also the source of the vendored Swift/MLX shape and paint backends (their newer Swift `main` branch — see [`swift/README.md`](swift/README.md))
 - [Tencent Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2)
 - [TRELLIS](https://github.com/microsoft/TRELLIS) (Lane et al., 2024)
 - [pedronaugusto](https://github.com/pedronaugusto) — MLX implementation and related contributions
