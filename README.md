@@ -17,13 +17,14 @@ Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
 ---
 
-## Latest release: [v0.3.1](../../releases/tag/v0.3.1)
+## Latest release: [v0.3.5](../../releases/tag/v0.3.5)
 
-- **Fixed re-texture-with-a-new-seed silently doing nothing on the Swift paint backend** — the CLI parsed `--seed` but never forwarded it into the diffusion call, so every Swift-backend generation (RGB and PBR) was actually always seeded at 0 regardless of what was requested.
-- **Ported the texture despeckle filter to the Swift paint backend** — the median-filter cleanup for isolated dark/chromatic bake-texel flecks previously only ran on the old PyTorch/hybrid pipeline; it's now applied to Swift's output too.
-- **Removed ESRGAN entirely** (dead code since the UI checkbox that enabled it was removed) along with its 64MB weight file.
+- **Fixed warped/missing facial features on the Swift paint backend** (most visible on the Lowpoly preset) — the camera class-embedding index fed to the UNet was a plain per-view batch index instead of the model's actual trained camera-pose identity for each view, telling the model the wrong learned viewpoint on every render.
+- **Fixed inconsistent eyes/fine detail from the SD-Turbo upscale pass** — the per-view detail pass had no fixed seed (non-deterministic run-to-run) and used decorrelated noise per view; it's now seeded from the run's seed, with the same seed shared across all views for consistency in regions multiple views blend together.
+- **Replaced the Swift bake's texture-fill algorithm with the real reference algorithm** — unseen/self-occluded texels (e.g. a tail folding against a body) previously filled via a simplified 2D nearest-neighbor approach that produced jagged, glitchy-looking seams; now uses the actual Tencent reference algorithm (mesh vertex-graph color propagation), plus a small blur pass for residual fine-grained gaps.
+- **Fixed a missing `rtree` dependency** needed by the post-texture mesh-simplification UV-transfer path.
 
-See the [full release notes](../../releases/tag/v0.3.1) for details, and [v0.3.0's notes](../../releases/tag/v0.3.0) for the native Swift/MLX paint backend, CFG/RoPE fix, and redesigned presets.
+See the [full release notes](../../releases/tag/v0.3.5) for details, and [v0.3.0's notes](../../releases/tag/v0.3.0) for the native Swift/MLX paint backend, CFG/RoPE fix, and redesigned presets.
 
 ---
 

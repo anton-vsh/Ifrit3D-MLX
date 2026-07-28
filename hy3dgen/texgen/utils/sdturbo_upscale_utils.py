@@ -71,11 +71,23 @@ class SDTurboUpscaler():
     DEFAULT_PROMPT = "highly detailed, sharp, photorealistic texture"
 
     @torch.no_grad()
-    def __call__(self, image: Image.Image, subject: str = None) -> Image.Image:
+    def __call__(self, image: Image.Image, subject: str = None, seed: int = None) -> Image.Image:
         prompt = f"{subject}, {self.DEFAULT_PROMPT}" if subject else self.DEFAULT_PROMPT
         upsampled = image.convert('RGB').resize(
             (self.texture_size, self.texture_size), Image.LANCZOS,
         )
+        # Without a fixed generator, each of the ~6 views draws from whatever
+        # state the global torch RNG happens to be in — non-deterministic
+        # run-to-run, and independently-random noise per view. Callers pass
+        # the SAME seed for every view of one run (not one per view): using
+        # the same noise across views is what actually helps consistency in
+        # regions multiple views blend together (e.g. a temple/cheek area
+        # covered by both the front and a 3/4 side view) — decorrelated
+        # per-view noise is what caused visibly mismatched fine detail
+        # (most noticeable as inconsistent eyes) between overlapping views.
+        generator = None
+        if seed is not None:
+            generator = torch.Generator(device=self.device).manual_seed(seed)
         with _SD_LOCK:
             out = self.pipe(
                 prompt=prompt,
@@ -85,5 +97,6 @@ class SDTurboUpscaler():
                 width=self.texture_size,
                 num_inference_steps=self.steps,
                 guidance_scale=0.0,
+                generator=generator,
             ).images[0]
         return out

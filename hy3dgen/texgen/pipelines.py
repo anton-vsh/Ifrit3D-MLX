@@ -573,7 +573,7 @@ class Hunyuan3DPaintPipeline:
             subject = self._get_subject_classifier()(images_prompt[0])
             logger.debug(f"SD Turbo detail pass subject: {subject!r}")
             for i in range(len(multiviews)):
-                multiviews[i] = sd_model(multiviews[i], subject=subject)
+                multiviews[i] = sd_model(multiviews[i], subject=subject, seed=seed)
 
         if progress_callback is not None:
             progress_callback(0.85, "Baking multiview -> UV texture...")

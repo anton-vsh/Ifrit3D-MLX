@@ -71,6 +71,55 @@ upstream's `main` branch:
   0 regardless of the `--seed` value, so "re-texture with a new seed" was
   a no-op. Fixed by threading the parsed seed through explicitly at each
   call site.
+- **The camera class-embedding fix**: `paintRGB`/`paintRGBRawViews` fed the
+  UNet's camera class embedding a plain per-view batch index (`0..N-1`)
+  instead of the model's actual learned camera-pose identity for each
+  (elev, azim) — Python's `camera_info` in `hy3dgen/texgen/pipelines.py`
+  computes this via `(((azim // 30) + 9) % 12) // divisor[elev] +
+  offset[elev]`, which for this app's fixed 6 views (`elevs=[0,0,0,0,90,
+  -90]`, `azims=[0,90,180,270,0,180]`) works out to `[21,12,15,18,43,37]`,
+  not `[0,1,2,3,4,5]`. Every Swift-backend paint generation was telling
+  the model the wrong learned viewpoint per render, which manifests as
+  warped/missing facial features on faces specifically (most visible on
+  the Lowpoly preset, where there's little geometric detail to mask it).
+  Added a `cameraClassIndex(elev:azim:)` helper mirroring the Python
+  formula and used it at both call sites. Verified with a controlled A/B
+  (identical simplified mesh, identical seed, only the binary differs):
+  the shipped (pre-fix) binary reproduces the exact warped-face artifact,
+  the fixed binary does not.
+- **Mesh-graph vertex-propagation inpaint (real reference algorithm, not a
+  simplification)**: unpainted texels (self-occluded by the fixed 6-view
+  scheme — folds like a tail curling into a body, ear undersides, etc.)
+  were filled via `Inpaint.swift`'s 2D EDT-nearest-neighbor + Navier-Stokes,
+  which produces a hard-edged "Voronoi cell" mosaic on any UV atlas with
+  many small holes — visible as jagged, glitchy-looking creases. That
+  EDT+NS pairing is a simplification the Swift port's own build harness
+  substituted when generating its parity-test Python oracle (see
+  `python/paint/hy3dpaint_mlx/mesh_render.py`'s `inpaint`, whose docstring
+  admits it only "mirrors" the reference) — the actual Tencent reference
+  algorithm (`hy3dgen/texgen/differentiable_renderer/mesh_processor.py`'s
+  `meshVerticeInpaint_smooth`, upstream of this Swift port entirely)
+  propagates color along the mesh's own vertex adjacency graph (real 3D
+  connectivity), not 2D atlas-pixel space, so it can't bleed color across
+  unrelated UV islands and doesn't produce hard nearest-neighbor seams.
+  Ported it as `MeshVerticeInpaint.swift` (`MeshRender.inpaintWithMeshGraph`),
+  run before the existing EDT+NS pass (which still mops up whatever the
+  graph pass can't reach — texels whose owning vertex has no path to any
+  colored vertex). Verified with a controlled A/B on a 100k-face mesh: a
+  tail-against-body fold that baked as a hard, jagged, sparkly seam under
+  the old fill comes out as a smooth gradient with the ported algorithm,
+  with despeckle-detected flecks essentially unchanged (976 vs. shipped's
+  923 — not introducing new artifacts). Also layered a small hole-only
+  post-Navier-Stokes box blur (`Inpaint.swift`'s `smoothRadius` param,
+  `max(2, tex/256)`) on top for the residual fine-grained padding a single
+  mesh-graph pass doesn't reach — confirmed via A/B this adds real polish
+  to those areas at negligible cost (fleck count 1017) without touching
+  the crease fix itself. (A separate experiment tried adding oblique
+  camera views — elev ±20°, which the camera-class-embedding table has
+  unused slots for — as a fix for the same self-occlusion problem; it
+  didn't help, since the coverage gap on a detailed mesh comes from many
+  small disconnected UV islands, not from missing a specific viewing
+  angle. Not pursued further.)
 
 Regenerate the patch after making further source changes with:
 `cd /tmp/hy3d-swift-src && git diff > /Users/user/Hunyuan3D-MLX/swift/patches/0001-local-modifications.patch`

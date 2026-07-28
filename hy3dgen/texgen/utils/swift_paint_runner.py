@@ -211,7 +211,7 @@ def run_swift_paint(
         t_sd0 = time.time()
         for i in range(6):
             view = Image.open(dump_dir / f"view_{i}.png").convert("RGB")
-            processed = upscaler(view, subject=subject)
+            processed = upscaler(view, subject=subject, seed=seed)
             processed.save(sd_dir / f"view_{i}.png")
             if progress_callback is not None:
                 progress_callback(0.4 + 0.4 * (i + 1) / 6, f"SD-Turbo detail pass — view {i + 1}/6")

@@ -1,5 +1,81 @@
+diff --git a/Sources/HunyuanPaintMLX/Inpaint.swift b/Sources/HunyuanPaintMLX/Inpaint.swift
+index 30852ec..aef50a9 100644
+--- a/Sources/HunyuanPaintMLX/Inpaint.swift
++++ b/Sources/HunyuanPaintMLX/Inpaint.swift
+@@ -258,8 +258,60 @@ enum Inpaint {
+ 
+     // MARK: - Full reference pipeline (clip -> EDT fill -> u8 round-trip + NS)
+ 
++    /// Separable box blur, clamped at edges. Only the texels flagged in `holes` are
++    /// overwritten with the blurred result — `covered`/known texels pass through exactly,
++    /// so real painted content is never softened, only the raw EDT-nearest "Voronoi cell"
++    /// fill used to seed unseen regions.
++    private static func blurHoles(_ src: [Float], holes: [Bool], H: Int, W: Int, radius: Int) -> [Float] {
++        guard radius > 0 else { return src }
++        let ch = 3
++        var tmp = [Float](repeating: 0, count: src.count)
++        for r in 0 ..< H {
++            for c in 0 ..< W {
++                var sums: (Float, Float, Float) = (0, 0, 0)
++                var n: Float = 0
++                for dc in -radius ... radius {
++                    let cc = min(max(c + dc, 0), W - 1)
++                    let p = (r * W + cc) * ch
++                    sums.0 += src[p]; sums.1 += src[p + 1]; sums.2 += src[p + 2]
++                    n += 1
++                }
++                let p = (r * W + c) * ch
++                tmp[p] = sums.0 / n; tmp[p + 1] = sums.1 / n; tmp[p + 2] = sums.2 / n
++            }
++        }
++        var out = src
++        for r in 0 ..< H {
++            for c in 0 ..< W {
++                guard holes[r * W + c] else { continue }
++                var sums: (Float, Float, Float) = (0, 0, 0)
++                var n: Float = 0
++                for dr in -radius ... radius {
++                    let rr = min(max(r + dr, 0), H - 1)
++                    let p = (rr * W + c) * ch
++                    sums.0 += tmp[p]; sums.1 += tmp[p + 1]; sums.2 += tmp[p + 2]
++                    n += 1
++                }
++                let p = (r * W + c) * ch
++                out[p] = sums.0 / n; out[p + 1] = sums.1 / n; out[p + 2] = sums.2 / n
++            }
++        }
++        return out
++    }
++
+     /// `texture` is H*W*3 row-major float32; returns the filled texture (same layout, [0,1]).
+-    static func fill(texture: [Float], covered: [Bool], H: Int, W: Int) -> [Float] {
++    /// `smoothRadius` (default 0, off): when > 0, blurs the *final* Navier-Stokes result for
++    /// unseen texels. Note this has to be a post-process, not a pre-seed: NS's fast-marching
++    /// recomputes every hole pixel's value from its own gradient estimate as the front reaches
++    /// it, so whatever initial value a hole pixel starts with (raw or pre-blurred) is fully
++    /// discarded — seeding doesn't reach the final output at all. The actual hard-edged mosaic
++    /// look comes from NS's own diffusion having many small, disjoint covered "source islands"
++    /// to propagate from on a heavily-fragmented UV atlas (common on detailed meshes seen by
++    /// only a handful of fixed cameras) — adjacent fronts from different sources meet at hard
++    /// seams. A post-blur smooths exactly those seams. Known/painted texels are never touched.
++    /// Default 0 preserves the exact bit-for-bit Python-reference behavior the parity gate
++    /// (testInpaint) checks.
++    static func fill(texture: [Float], covered: [Bool], H: Int, W: Int, smoothRadius: Int = 0) -> [Float] {
+         var out = texture.map { min(max($0, 0), 1) }
+         let holes = covered.map { !$0 }
+         let anyHole = holes.contains(true), anyCovered = covered.contains(true)
+@@ -276,6 +328,9 @@ enum Inpaint {
+         for p in 0 ..< u8.count { u8[p] = UInt8(gathered[p] * 255) }
+         navierStokes(&u8, holes: holes, H: H, W: W)
+         for p in 0 ..< u8.count { out[p] = Float(u8[p]) / 255 }
++        if smoothRadius > 0 {
++            out = blurHoles(out, holes: holes, H: H, W: W, radius: smoothRadius)
++        }
+         return out
+     }
+ }
 diff --git a/Sources/HunyuanPaintMLX/MeshRender.swift b/Sources/HunyuanPaintMLX/MeshRender.swift
-index 7d38cc5..02331fc 100644
+index 7d38cc5..12a1c4b 100644
 --- a/Sources/HunyuanPaintMLX/MeshRender.swift
 +++ b/Sources/HunyuanPaintMLX/MeshRender.swift
 @@ -169,11 +169,85 @@ public final class MeshRender {
@@ -97,7 +173,7 @@ index 7d38cc5..02331fc 100644
          let cosThr = cos(75.0 * Float.pi / 180)
          let proj = MLXArray(projM, [4, 4])
          let vertPosw = concatenated([vtxPos, ones([vtxPos.dim(0), 1])], axis: 1)
-@@ -206,20 +281,28 @@ public final class MeshRender {
+@@ -206,30 +281,56 @@ public final class MeshRender {
              let flat = ri * Int32(Wd) + ci
              let covAt = take(covd, flat, axis: 0)
              let depthAt = take(depthMap, flat, axis: 0)
@@ -129,8 +205,38 @@ index 7d38cc5..02331fc 100644
      }
  
      /// Fill un-painted texels; matches the Python reference exactly (see `Inpaint`):
+     /// clip -> scipy-EDT nearest fill -> uint8 round-trip with OpenCV `INPAINT_NS` on the holes.
+     /// Painted texels come back exactly as Python returns them (uint8-quantized by the NS pass).
+-    public static func inpaint(_ texture: MLXArray, _ mask: MLXArray) -> MLXArray {
++    public static func inpaint(_ texture: MLXArray, _ mask: MLXArray, smoothRadius: Int = 0) -> MLXArray {
+         let H = texture.dim(0), W = texture.dim(1)
+         let tex = texture.asType(.float32).asArray(Float.self)
+         let covered = mask.reshaped([H * W]).asType(.int32).asArray(Int32.self).map { $0 != 0 }
+-        let filled = Inpaint.fill(texture: tex, covered: covered, H: H, W: W)
++        let filled = Inpaint.fill(texture: tex, covered: covered, H: H, W: W, smoothRadius: smoothRadius)
++        return MLXArray(filled, [H, W, 3])
++    }
++
++    /// Same as `inpaint`, but runs the real reference `meshVerticeInpaint` (mesh vertex-graph
++    /// color propagation — see MeshVerticeInpaint.swift) first, then whatever's still unfilled
++    /// falls through to the existing EDT+NS pass exactly as before.
++    public static func inpaintWithMeshGraph(
++        _ texture: MLXArray, _ mask: MLXArray,
++        origPositions: [Float], unweldedToOrig: [UInt32], uvs: [Float], indices: [UInt32],
++        smoothRadius: Int = 0
++    ) -> MLXArray {
++        let H = texture.dim(0), W = texture.dim(1)
++        var tex = texture.asType(.float32).asArray(Float.self)
++        var covered = mask.reshaped([H * W]).asType(.int32).asArray(Int32.self).map { $0 != 0 }
++        MeshVerticeInpaint.smooth(texture: &tex, covered: &covered, H: H, W: W,
++                                   origPositions: origPositions, unweldedToOrig: unweldedToOrig,
++                                   uvs: uvs, indices: indices)
++        let filled = Inpaint.fill(texture: tex, covered: covered, H: H, W: W, smoothRadius: smoothRadius)
+         return MLXArray(filled, [H, W, 3])
+     }
+ 
 diff --git a/Sources/HunyuanPaintMLX/Pipeline.swift b/Sources/HunyuanPaintMLX/Pipeline.swift
-index b513ee8..3005a4e 100644
+index b513ee8..4cb01b1 100644
 --- a/Sources/HunyuanPaintMLX/Pipeline.swift
 +++ b/Sources/HunyuanPaintMLX/Pipeline.swift
 @@ -33,6 +33,20 @@ public struct PaintResult {
@@ -154,7 +260,31 @@ index b513ee8..3005a4e 100644
  /// PBR paint result: same geometry contract as `PaintResult`, plus the second baked map.
  /// `metallicRoughnessPNG` uses the glTF channel packing the model produces: G = roughness,
  /// B = metallic (R unused). Feed both PNGs to `writeGLB` or the app's own serializer.
-@@ -108,11 +122,11 @@ public final class PaintPipeline {
+@@ -44,6 +58,23 @@ public struct PBRPaintResult {
+     public let metallicRoughnessPNG: Data   // baked MR texture as PNG bytes (G=roughness, B=metallic)
+ }
+ 
++/// Per-view camera class-embedding index, matching hy3dgen/texgen/pipelines.py's `camera_info`
++/// (Python: `(((azim // 30) + 9) % 12) // divisor[elev] + offset[elev]`). This identifies which
++/// of the model's 44 learned camera-pose embeddings a given (elev, azim) render corresponds to;
++/// it is NOT the same as the view's position in the batch. Swift previously passed the plain
++/// batch index (0..N-1) here, which fed the wrong learned camera identity into the class
++/// embedding for every view except by-coincidence overlaps — this is a python floor-division
++/// formula, so azim/elev are Int here (all call sites use exact-degree camera angles).
++func cameraClassIndex(elev: Int, azim: Int) -> Int32 {
++    let divisor: [Int: Int] = [-20: 1, 0: 1, 20: 1, -90: 3, 90: 3]
++    let offset: [Int: Int] = [-20: 0, 0: 12, 20: 24, -90: 36, 90: 40]
++    guard let d = divisor[elev], let o = offset[elev] else {
++        fatalError("cameraClassIndex: unsupported elevation \(elev) (expected one of -20, 0, 20, -90, 90)")
++    }
++    let azimBucket = ((azim / 30) + 9) % 12
++    return Int32(azimBucket / d + o)
++}
++
+ /// Paint pipeline in Swift: mesh + image → textured geometry. Port of run_paint*.py.
+ /// A class so loaded model weights stay resident across runs.
+ public final class PaintPipeline {
+@@ -108,11 +139,11 @@ public final class PaintPipeline {
      /// core is shared with the app entry point; this only loads the mesh, writes the debug
      /// texture PNGs next to the output, and serializes the GLB.
      public func run(meshPath: String, imagePath: String, outGLB: String,
@@ -168,7 +298,25 @@ index b513ee8..3005a4e 100644
                                     debugPathPrefix: outGLB,
                                     onProgress: { s, _ in log(s) }) else { return }
          // debug: the baked textures next to the GLB (same bytes that get embedded)
-@@ -194,6 +208,94 @@ public final class PaintPipeline {
+@@ -158,7 +189,7 @@ public final class PaintPipeline {
+         var latents = MLXRandom.normal([1, N, h, h, 4])
+         let ced = wrap.prepare(refLat: refLat)
+         let neg = zeros(gen.shape)
+-        let camGen = (0..<N).map { Int32($0) }
++        let camGen = zip(elevs, azims).map { cameraClassIndex(elev: Int($0), azim: Int($1)) }
+         for (i, t) in ts.enumerated() {
+             if isCancelled() { return nil }
+             let tArr = MLXArray(Array(repeating: Float(t), count: N))
+@@ -186,7 +217,7 @@ public final class PaintPipeline {
+ 
+         onProgress?("Baking texture", 0.93)
+         let (texs, covered) = R.bakeMulti([views], elevs, azims, textureSize: tex, weights: vw)
+-        let texC = MeshRender.inpaint(texs[0], covered); eval(texC)
++        let texC = MeshRender.inpaintWithMeshGraph(texs[0], covered, origPositions: mesh.vertices, unweldedToOrig: uw.vmapping, uvs: uw.uvs, indices: uw.indices, smoothRadius: max(2, tex / 256)); eval(texC)
+         guard let albedoPNG = pngData(texC) else { return nil }
+         var uvOut = uw.uvs
+         for i in 0..<(uvOut.count / 2) { uvOut[i*2+1] = 1 - uvOut[i*2+1] }          // v-flip → viewer top-left
+@@ -194,6 +225,94 @@ public final class PaintPipeline {
          return PaintResult(vertices: V, faces: uw.indices, uvs: uvOut, albedoPNG: albedoPNG)
      }
  
@@ -205,7 +353,7 @@ index b513ee8..3005a4e 100644
 +        var latents = MLXRandom.normal([1, N, h, h, 4])
 +        let ced = wrap.prepare(refLat: refLat)
 +        let neg = zeros(gen.shape)
-+        let camGen = (0..<N).map { Int32($0) }
++        let camGen = zip(elevs, azims).map { cameraClassIndex(elev: Int($0), azim: Int($1)) }
 +        for (i, t) in ts.enumerated() {
 +            let tArr = MLXArray(Array(repeating: Float(t), count: N))
 +            let vc = wrap.predict(latents, tArr, text: gen, normalLat: normalLat, positionLat: positionLat, camGen: camGen, ced: ced, mvaScale: 1, refScale: 1)
@@ -252,7 +400,7 @@ index b513ee8..3005a4e 100644
 +        onProgress?("Baking texture", 0.7)
 +        let (texs, covered) = R.bakeMulti([views], elevs, azims, textureSize: tex, weights: vw,
 +                                          confidenceCosThr: confThresh)
-+        let texC = MeshRender.inpaint(texs[0], covered); eval(texC)
++        let texC = MeshRender.inpaintWithMeshGraph(texs[0], covered, origPositions: mesh.vertices, unweldedToOrig: uw.vmapping, uvs: uw.uvs, indices: uw.indices, smoothRadius: max(2, tex / 256)); eval(texC)
 +        guard let albedoPNG = pngData(texC) else { return nil }
 +        var uvOut = uw.uvs
 +        for i in 0..<(uvOut.count / 2) { uvOut[i*2+1] = 1 - uvOut[i*2+1] }
@@ -264,10 +412,10 @@ index b513ee8..3005a4e 100644
      /// metallic-roughness textures. Same contract as `paintRGB`: polls `isCancelled` (returns
      /// nil if it fires), streams decoded albedo view grids via `onViews`, reports stages via
 diff --git a/Sources/hy3d/Paint.swift b/Sources/hy3d/Paint.swift
-index ad0fc25..b25f344 100644
+index ad0fc25..95ac8b0 100644
 --- a/Sources/hy3d/Paint.swift
 +++ b/Sources/hy3d/Paint.swift
-@@ -17,18 +17,69 @@ func cmdPaint(_ args: Args) throws {
+@@ -17,18 +17,70 @@ func cmdPaint(_ args: Args) throws {
      let steps = args.int("steps") ?? 15
      let tex = args.int("tex") ?? (model == "pbr" ? 4096 : 2048)
      let superRes = !args.flag("no-superres")
@@ -293,7 +441,8 @@ index ad0fc25..b25f344 100644
 +        // to `inpaint`'s EDT-nearest fill, instead of baking in whatever a
 +        // single weak/grazing view produced. Omit the flag to keep old behavior.
 +        let confThresh: Float? = args.float("conf-thresh-deg").map { cos($0 * Float.pi / 180) }
-+        let viewPaths = (0..<6).map { "\(bakeDir)/view_\($0).png" }
++        let numViews = args.int("num-views") ?? 6
++        let viewPaths = (0..<numViews).map { "\(bakeDir)/view_\($0).png" }
 +        for p in viewPaths where !FileManager.default.fileExists(atPath: p) {
 +            throw CLIError("paint: --bake-views missing \(p)")
 +        }
