@@ -120,9 +120,43 @@ upstream's `main` branch:
   didn't help, since the coverage gap on a detailed mesh comes from many
   small disconnected UV islands, not from missing a specific viewing
   angle. Not pursued further.)
+- **Dark/muddy default material fix**: `GLB.swift`'s writer hardcoded
+  `metallicFactor: 1.0, roughnessFactor: 1.0` for every export. That's a
+  neutral multiplier when a real `metallicRoughnessTexture` is present
+  (final value = factor × texture value, so 1.0 just passes it through) —
+  but this app's RGB/"2.0" paint path never generates one, so for every
+  actual generation these factors *are* the whole material response: fully
+  metallic + fully rough, which real-time PBR viewers (Gradio's Model3D,
+  Blender, any glTF viewer) render as dark/muddy regardless of how bright
+  the baked albedo texture itself is (fully metallic surfaces have almost
+  no diffuse reflectance). Changed to `metallicFactor: 0.0` when no MR
+  texture is present, matching this repo's own Python-side convention
+  (`mesh_utils.py`'s `save_mesh`: `metallicFactor=0.0, roughnessFactor=1.0`).
+  Verified by reloading an exported GLB and checking the material factors
+  directly (0.0/1.0, as expected) rather than just visually.
+- **Face-symmetry fix (lowered 3/4-view bake weight)**: `bakeMulti`'s
+  per-view weights (`vw` in `Pipeline.swift`, shared as a tuned constant
+  with the Python reference's `candidate_view_weights`) gave the two 3/4-
+  profile views (`azim=90`/`270`) weight 0.1 each. On faces specifically,
+  this let enough of those views bleed into the central face region (where
+  the front view's confidence — `cos(angle)^6` — drops near the nose/cheek
+  curvature) to visibly shift feature positions (e.g. one eyebrow sitting
+  higher than the other) even though the front view alone, checked in
+  isolation via `--dump-views`, was reasonably faithful to the reference
+  photo. The two 3/4 views are independently diffused and aren't
+  guaranteed to agree with the front view on exact feature placement, so
+  any meaningful blend-through pulls the result away from the front view's
+  own (better) depiction. Lowered to 0.03 — confirmed via controlled A/B
+  (same dumped views, only the bake weights differ) that this resolves the
+  face asymmetry while leaving temple/ear coverage intact, and confirmed
+  no visible regression on two non-face test subjects (a glossy porcelain
+  figurine, a rough stone sculpture) at the new weight.
 
 Regenerate the patch after making further source changes with:
-`cd /tmp/hy3d-swift-src && git diff > /Users/user/Hunyuan3D-MLX/swift/patches/0001-local-modifications.patch`
+`cd /tmp/hy3d-swift-src && git add -N . && git diff > /Users/user/Hunyuan3D-MLX/swift/patches/0001-local-modifications.patch`
+(the `git add -N .` marks any new untracked files as intent-to-add first —
+without it, `git diff` silently omits new files entirely, which is exactly
+what happened to `MeshVerticeInpaint.swift` above until this was caught.)
 
 ### Rebuilding it
 

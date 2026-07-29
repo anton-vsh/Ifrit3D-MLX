@@ -1,3 +1,27 @@
+diff --git a/Sources/HunyuanPaintMLX/GLB.swift b/Sources/HunyuanPaintMLX/GLB.swift
+index 0d22784..45ed3a6 100644
+--- a/Sources/HunyuanPaintMLX/GLB.swift
++++ b/Sources/HunyuanPaintMLX/GLB.swift
+@@ -226,9 +226,18 @@ public func writeGLB(path: String,
+ 
+     // MARK: Build material.
+ 
++    // metallicFactor/roughnessFactor of 1.0/1.0 are neutral multipliers when a real
++    // metallicRoughnessTexture is present (final = factor * texture value, so 1.0 just
++    // passes the texture through unmodified) -- correct for the PBR path. But when there's
++    // no such texture (every non-PBR generation from this app), these factors ARE the whole
++    // material response, and 1.0/1.0 means fully metallic + fully rough: real-time PBR
++    // renderers (Gradio's Model3D viewer, Blender, any glTF viewer) give fully metallic
++    // surfaces almost no diffuse reflectance, so this rendered dark/muddy regardless of the
++    // baked albedo texture's own brightness. Matches this repo's own Python-side convention
++    // (mesh_utils.py's save_mesh: metallicFactor=0.0, roughnessFactor=1.0) for the no-map case.
+     var pbr: [String: Any] = [
+         "baseColorTexture": ["index": 0, "texCoord": 0],
+-        "metallicFactor": 1.0,
++        "metallicFactor": mrTextureIndex >= 0 ? 1.0 : 0.0,
+         "roughnessFactor": 1.0
+     ]
+     if mrTextureIndex >= 0 {
 diff --git a/Sources/HunyuanPaintMLX/Inpaint.swift b/Sources/HunyuanPaintMLX/Inpaint.swift
 index 30852ec..aef50a9 100644
 --- a/Sources/HunyuanPaintMLX/Inpaint.swift
@@ -235,8 +259,121 @@ index 7d38cc5..12a1c4b 100644
          return MLXArray(filled, [H, W, 3])
      }
  
+diff --git a/Sources/HunyuanPaintMLX/MeshVerticeInpaint.swift b/Sources/HunyuanPaintMLX/MeshVerticeInpaint.swift
+new file mode 100644
+index 0000000..3298bbd
+--- /dev/null
++++ b/Sources/HunyuanPaintMLX/MeshVerticeInpaint.swift
+@@ -0,0 +1,107 @@
++import Foundation
++
++/// Port of hy3dgen/texgen/differentiable_renderer/mesh_processor.py's
++/// `meshVerticeInpaint_smooth` — Tencent's actual reference algorithm for filling
++/// unpainted texels, which this Swift binary's own `Inpaint.fill` (EDT nearest-neighbor
++/// + Navier-Stokes) is NOT: that pairing is a simplification the Swift port's own build
++/// harness substituted when generating its Python "oracle" fixtures (see
++/// python/paint/hy3dpaint_mlx/mesh_render.py's `inpaint`, whose docstring says it only
++/// "mirrors" the reference — an acknowledged approximation). The real algorithm
++/// propagates color along the MESH's vertex adjacency graph (real 3D connectivity), not
++/// 2D UV-atlas pixel space, so it can't bleed color across unrelated UV islands and
++/// doesn't produce the hard Voronoi-cell seams nearest-neighbor-in-pixel-space does.
++enum MeshVerticeInpaint {
++    /// Mutates `texture`/`covered` in place: texels reachable from a colored vertex via
++    /// the mesh's own edges get filled with a distance-weighted average of colored
++    /// neighbors, iterated to convergence (matching Python's `smooth_count` loop exactly).
++    /// Whatever's left uncovered afterward is unchanged, for the existing EDT+NS pass to
++    /// mop up. `origPositions` is per ORIGINAL (welded) vertex; `unweldedToOrig` is
++    /// xatlas's vmapping (unwelded vertex index -> original vertex index); `uvs`/`indices`
++    /// are xatlas's own per-corner UVs/triangle indices (unwelded space).
++    static func smooth(
++        texture: inout [Float], covered: inout [Bool], H: Int, W: Int,
++        origPositions: [Float], unweldedToOrig: [UInt32], uvs: [Float], indices: [UInt32]
++    ) {
++        let vtxNum = origPositions.count / 3
++        guard vtxNum > 0 else { return }
++        var vtxMask = [Bool](repeating: false, count: vtxNum)
++        var vtxColor = [(Float, Float, Float)](repeating: (0, 0, 0), count: vtxNum)
++        var uncoloredSet = Set<Int>()
++        var graph = [[Int]](repeating: [], count: vtxNum)
++
++        func texel(_ unweldedIdx: Int) -> (row: Int, col: Int) {
++            let u = uvs[unweldedIdx * 2], v = uvs[unweldedIdx * 2 + 1]
++            let col = min(max(Int((u * Float(W - 1)).rounded()), 0), W - 1)
++            let row = min(max(Int(((1.0 - v) * Float(H - 1)).rounded()), 0), H - 1)
++            return (row, col)
++        }
++
++        let faceCount = indices.count / 3
++        for f in 0 ..< faceCount {
++            for k in 0 ..< 3 {
++                let unweldedIdx = Int(indices[f * 3 + k])
++                let origIdx = Int(unweldedToOrig[unweldedIdx])
++                let (row, col) = texel(unweldedIdx)
++                let p = (row * W + col) * 3
++                if covered[row * W + col] {
++                    vtxMask[origIdx] = true
++                    vtxColor[origIdx] = (texture[p], texture[p + 1], texture[p + 2])
++                } else {
++                    uncoloredSet.insert(origIdx)
++                }
++                let nextUnwelded = Int(indices[f * 3 + (k + 1) % 3])
++                graph[origIdx].append(Int(unweldedToOrig[nextUnwelded]))
++            }
++        }
++        let uncolored = Array(uncoloredSet)
++        guard !uncolored.isEmpty else { return }
++
++        func pos(_ i: Int) -> (Float, Float, Float) {
++            (origPositions[i * 3], origPositions[i * 3 + 1], origPositions[i * 3 + 2])
++        }
++
++        var smoothCount = 2
++        var lastUncoloredCount = -1
++        while smoothCount > 0 {
++            var uncoloredCount = 0
++            for vtxIdx in uncolored {
++                if vtxMask[vtxIdx] { continue }
++                var sum: (Float, Float, Float) = (0, 0, 0)
++                var totalWeight: Float = 0
++                let p0 = pos(vtxIdx)
++                for connected in graph[vtxIdx] where vtxMask[connected] {
++                    let p1 = pos(connected)
++                    let dx = p0.0 - p1.0, dy = p0.1 - p1.1, dz = p0.2 - p1.2
++                    let dist = (dx * dx + dy * dy + dz * dz).squareRoot()
++                    var w = 1 / max(dist, 1e-4)
++                    w *= w
++                    sum.0 += vtxColor[connected].0 * w
++                    sum.1 += vtxColor[connected].1 * w
++                    sum.2 += vtxColor[connected].2 * w
++                    totalWeight += w
++                }
++                if totalWeight > 0 {
++                    vtxColor[vtxIdx] = (sum.0 / totalWeight, sum.1 / totalWeight, sum.2 / totalWeight)
++                    vtxMask[vtxIdx] = true
++                } else {
++                    uncoloredCount += 1
++                }
++            }
++            if lastUncoloredCount == uncoloredCount { smoothCount -= 1 } else { smoothCount += 1 }
++            lastUncoloredCount = uncoloredCount
++        }
++
++        for f in 0 ..< faceCount {
++            for k in 0 ..< 3 {
++                let unweldedIdx = Int(indices[f * 3 + k])
++                let origIdx = Int(unweldedToOrig[unweldedIdx])
++                guard vtxMask[origIdx] else { continue }
++                let (row, col) = texel(unweldedIdx)
++                let p = (row * W + col) * 3
++                let c = vtxColor[origIdx]
++                texture[p] = c.0; texture[p + 1] = c.1; texture[p + 2] = c.2
++                covered[row * W + col] = true
++            }
++        }
++    }
++}
 diff --git a/Sources/HunyuanPaintMLX/Pipeline.swift b/Sources/HunyuanPaintMLX/Pipeline.swift
-index b513ee8..4cb01b1 100644
+index b513ee8..ac47f5f 100644
 --- a/Sources/HunyuanPaintMLX/Pipeline.swift
 +++ b/Sources/HunyuanPaintMLX/Pipeline.swift
 @@ -33,6 +33,20 @@ public struct PaintResult {
@@ -284,6 +421,15 @@ index b513ee8..4cb01b1 100644
  /// Paint pipeline in Swift: mesh + image → textured geometry. Port of run_paint*.py.
  /// A class so loaded model weights stay resident across runs.
  public final class PaintPipeline {
+@@ -56,7 +87,7 @@ public final class PaintPipeline {
+     let superRes: Bool
+     let elevs: [Float] = [0, 0, 0, 0, 90, -90]
+     let azims: [Float] = [0, 90, 180, 270, 0, 180]
+-    let vw: [Float] = [1, 0.1, 0.5, 0.1, 0.05, 0.05]
++    let vw: [Float] = [1, 0.03, 0.5, 0.03, 0.05, 0.05]
+ 
+     // Resident RGB (2.0) models, loaded once on first paintRGB.
+     private var rgb: (vae: PaintVAE, wrap: Paint20Wrapper, sr: RealESRGAN?, gen: MLXArray)?
 @@ -108,11 +139,11 @@ public final class PaintPipeline {
      /// core is shared with the app entry point; this only loads the mesh, writes the debug
      /// texture PNGs next to the output, and serializes the GLB.
