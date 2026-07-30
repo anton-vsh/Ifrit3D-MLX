@@ -20,6 +20,10 @@ import gradio as gr
 import starlette.status
 import torch
 
+from hy3dgen.texgen.utils import dither_filter as _dither_defaults
+from hy3dgen.texgen.utils import stipple_filter as _stipple_defaults
+from hy3dgen.texgen.utils import riso_filter as _riso_defaults
+
 starlette.status.HTTP_422_UNPROCESSABLE_ENTITY = starlette.status.HTTP_422_UNPROCESSABLE_CONTENT
 
 ROOT = Path(__file__).resolve().parent
@@ -150,6 +154,75 @@ def _export_obj_zip(textured, tmp_dir):
     return str(zip_path)
 
 
+# Same 6 views this repo uses everywhere for multiview consistency
+# (hy3dgen/texgen/pipelines.py's candidate_camera_elevs/azims) -- reused here so
+# "Save Turnaround Set" produces the same canonical angles as the rest of the pipeline.
+_TURNAROUND_ELEVS = [0, 0, 0, 0, 90, -90]
+_TURNAROUND_AZIMS = [0, 90, 180, 270, 0, 180]
+_TURNAROUND_LABELS = ["front", "right", "back", "left", "top", "bottom"]
+
+
+def _render_view_png(glb_path, elev, azim, resolution):
+    """Renders `glb_path`'s current mesh from (elev, azim) with alpha transparency at
+    `resolution`x`resolution`, using the same MeshRender path as every filter preview
+    this session -- a real offline render, not a screenshot of the on-screen viewer, so
+    resolution is independent of whatever the Model3D widget happens to show on screen."""
+    import numpy as np
+    import trimesh as _trimesh
+    from PIL import Image as _Image
+    from hy3dgen.texgen.differentiable_renderer.mesh_render import MeshRender
+
+    if not glb_path:
+        raise gr.Error("Generate a model first!")
+
+    loaded = _trimesh.load(glb_path, process=False)
+    mesh = loaded.to_geometry() if isinstance(loaded, _trimesh.Scene) else loaded
+    albedo = mesh.visual.material.baseColorTexture.convert("RGB")
+
+    render = MeshRender(texture_size=albedo.size[0])
+    render.load_mesh(mesh)
+    view = render.render(elev, azim, tex=albedo, resolution=(resolution, resolution), return_type="np")
+    rgba = (view[..., :4] * 255).clip(0, 255).astype(np.uint8)
+    return _Image.fromarray(rgba, mode="RGBA")
+
+
+def _preview_view(glb_path, elev, azim):
+    if not glb_path:
+        return None
+    return _render_view_png(glb_path, elev, azim, 256)
+
+
+def _save_view_png(glb_path, elev, azim, resolution, progress=gr.Progress()):
+    progress(0.3, desc="Rendering...")
+    img = _render_view_png(glb_path, elev, azim, int(resolution))
+    out_path = OUTPUT_DIR / f"view_{int(elev)}_{int(azim)}_{int(resolution)}.png"
+    img.save(out_path, "PNG")
+    progress(1.0, desc="Done!")
+    return str(out_path)
+
+
+def _save_turnaround_zip(glb_path, resolution, progress=gr.Progress()):
+    if not glb_path:
+        raise gr.Error("Generate a model first!")
+
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    out_dir = OUTPUT_DIR / f"turnaround_{ts}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    total = len(_TURNAROUND_ELEVS)
+    for i, (elev, azim, label) in enumerate(zip(_TURNAROUND_ELEVS, _TURNAROUND_AZIMS, _TURNAROUND_LABELS)):
+        progress(i / total, desc=f"Rendering {label}...")
+        img = _render_view_png(glb_path, elev, azim, int(resolution))
+        img.save(out_dir / f"{label}.png", "PNG")
+
+    zip_path = out_dir.with_suffix(".zip")
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for f in out_dir.iterdir():
+            zf.write(f, f.name)
+    progress(1.0, desc="Done!")
+    return str(zip_path)
+
+
 def _scaled_progress(progress, lo, hi):
     def _cb(fraction, desc=None):
         progress(lo + fraction * (hi - lo), desc=desc)
@@ -179,6 +252,26 @@ def _run_retexture(
     paint_sd_res=768,
     enable_pbr=False,
     filter_style="None",
+    dither_ao_strength=_dither_defaults.DEFAULT_AO_STRENGTH,
+    dither_ao_gradient=_dither_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+    dither_fine_detail=_dither_defaults.DEFAULT_FINE_DETAIL,
+    dither_crease_sensitivity=_dither_defaults.DEFAULT_CREASE_SENSITIVITY,
+    dither_edge_strength=_dither_defaults.DEFAULT_EDGE_STRENGTH,
+    dither_edge_sensitivity=_dither_defaults.DEFAULT_EDGE_SENSITIVITY,
+    stipple_ao_strength=_stipple_defaults.DEFAULT_AO_STRENGTH,
+    stipple_ao_gradient=_stipple_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+    stipple_crease_sensitivity=_stipple_defaults.DEFAULT_CREASE_SENSITIVITY,
+    stipple_edge_strength=_stipple_defaults.DEFAULT_EDGE_STRENGTH,
+    stipple_dot_density=_stipple_defaults.DEFAULT_DOT_DENSITY,
+    stipple_dot_size=_stipple_defaults.DEFAULT_DOT_SIZE,
+    riso_ao_strength=_riso_defaults.DEFAULT_AO_STRENGTH,
+    riso_ao_gradient=_riso_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+    riso_fine_detail=_riso_defaults.DEFAULT_FINE_DETAIL,
+    riso_crease_sensitivity=_riso_defaults.DEFAULT_CREASE_SENSITIVITY,
+    riso_edge_sensitivity=_riso_defaults.DEFAULT_EDGE_SENSITIVITY,
+    riso_color_shadow="#0078BF",
+    riso_color_detail="#FF48B0",
+    riso_paper_color="#F6F2E8",
     progress=gr.Progress(),
 ):
     if not glb_path:
@@ -242,19 +335,32 @@ def _run_retexture(
         progress(0.92, desc="Applying dither filter...")
         start = time.time()
         from hy3dgen.texgen.utils.dither_filter import apply_dither_filter
-        textured = apply_dither_filter(textured)
+        textured = apply_dither_filter(
+            textured, ao_strength=dither_ao_strength, ao_gradient_length=dither_ao_gradient,
+            fine_detail=dither_fine_detail, crease_sensitivity=dither_crease_sensitivity,
+            edge_strength=dither_edge_strength, edge_sensitivity=dither_edge_sensitivity,
+        )
         print(f"[app] dither filter done in {time.time() - start:.1f}s")
     elif filter_style == "Stipple":
         progress(0.92, desc="Applying stipple filter...")
         start = time.time()
         from hy3dgen.texgen.utils.stipple_filter import apply_stipple_filter
-        textured = apply_stipple_filter(textured)
+        textured = apply_stipple_filter(
+            textured, ao_strength=stipple_ao_strength, ao_gradient_length=stipple_ao_gradient,
+            crease_sensitivity=stipple_crease_sensitivity, edge_strength=stipple_edge_strength,
+            dot_density=stipple_dot_density, dot_size=stipple_dot_size,
+        )
         print(f"[app] stipple filter done in {time.time() - start:.1f}s")
     elif filter_style == "Riso":
         progress(0.92, desc="Applying riso filter...")
         start = time.time()
         from hy3dgen.texgen.utils.riso_filter import apply_riso_filter
-        textured = apply_riso_filter(textured)
+        textured = apply_riso_filter(
+            textured, ao_strength=riso_ao_strength, ao_gradient_length=riso_ao_gradient,
+            fine_detail=riso_fine_detail, crease_sensitivity=riso_crease_sensitivity,
+            edge_sensitivity=riso_edge_sensitivity, color_shadow=riso_color_shadow,
+            color_detail=riso_color_detail, paper_color=riso_paper_color,
+        )
         print(f"[app] riso filter done in {time.time() - start:.1f}s")
 
     glb_out = run_dir / "result.glb"
@@ -288,6 +394,26 @@ def generate(
     paint_sd_res=768,
     enable_pbr=False,
     filter_style="None",
+    dither_ao_strength=_dither_defaults.DEFAULT_AO_STRENGTH,
+    dither_ao_gradient=_dither_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+    dither_fine_detail=_dither_defaults.DEFAULT_FINE_DETAIL,
+    dither_crease_sensitivity=_dither_defaults.DEFAULT_CREASE_SENSITIVITY,
+    dither_edge_strength=_dither_defaults.DEFAULT_EDGE_STRENGTH,
+    dither_edge_sensitivity=_dither_defaults.DEFAULT_EDGE_SENSITIVITY,
+    stipple_ao_strength=_stipple_defaults.DEFAULT_AO_STRENGTH,
+    stipple_ao_gradient=_stipple_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+    stipple_crease_sensitivity=_stipple_defaults.DEFAULT_CREASE_SENSITIVITY,
+    stipple_edge_strength=_stipple_defaults.DEFAULT_EDGE_STRENGTH,
+    stipple_dot_density=_stipple_defaults.DEFAULT_DOT_DENSITY,
+    stipple_dot_size=_stipple_defaults.DEFAULT_DOT_SIZE,
+    riso_ao_strength=_riso_defaults.DEFAULT_AO_STRENGTH,
+    riso_ao_gradient=_riso_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+    riso_fine_detail=_riso_defaults.DEFAULT_FINE_DETAIL,
+    riso_crease_sensitivity=_riso_defaults.DEFAULT_CREASE_SENSITIVITY,
+    riso_edge_sensitivity=_riso_defaults.DEFAULT_EDGE_SENSITIVITY,
+    riso_color_shadow="#0078BF",
+    riso_color_detail="#FF48B0",
+    riso_paper_color="#F6F2E8",
     shape_backend=SHAPE_BACKEND_DEFAULT,
     run_dir=None,
     progress=gr.Progress(),
@@ -393,19 +519,32 @@ def generate(
         progress(0.895, desc="Applying dither filter...")
         start = time.time()
         from hy3dgen.texgen.utils.dither_filter import apply_dither_filter
-        textured = apply_dither_filter(textured)
+        textured = apply_dither_filter(
+            textured, ao_strength=dither_ao_strength, ao_gradient_length=dither_ao_gradient,
+            fine_detail=dither_fine_detail, crease_sensitivity=dither_crease_sensitivity,
+            edge_strength=dither_edge_strength, edge_sensitivity=dither_edge_sensitivity,
+        )
         print(f"[app] dither filter done in {time.time() - start:.1f}s")
     elif filter_style == "Stipple":
         progress(0.895, desc="Applying stipple filter...")
         start = time.time()
         from hy3dgen.texgen.utils.stipple_filter import apply_stipple_filter
-        textured = apply_stipple_filter(textured)
+        textured = apply_stipple_filter(
+            textured, ao_strength=stipple_ao_strength, ao_gradient_length=stipple_ao_gradient,
+            crease_sensitivity=stipple_crease_sensitivity, edge_strength=stipple_edge_strength,
+            dot_density=stipple_dot_density, dot_size=stipple_dot_size,
+        )
         print(f"[app] stipple filter done in {time.time() - start:.1f}s")
     elif filter_style == "Riso":
         progress(0.895, desc="Applying riso filter...")
         start = time.time()
         from hy3dgen.texgen.utils.riso_filter import apply_riso_filter
-        textured = apply_riso_filter(textured)
+        textured = apply_riso_filter(
+            textured, ao_strength=riso_ao_strength, ao_gradient_length=riso_ao_gradient,
+            fine_detail=riso_fine_detail, crease_sensitivity=riso_crease_sensitivity,
+            edge_sensitivity=riso_edge_sensitivity, color_shadow=riso_color_shadow,
+            color_detail=riso_color_detail, paper_color=riso_paper_color,
+        )
         print(f"[app] riso filter done in {time.time() - start:.1f}s")
 
     glb_path = run_dir / "result.glb"
@@ -547,6 +686,116 @@ def _set_preset(name):
     else:  # high
         return 8, 256, False, True, 180000, False, True, True, 512, 20, 1.5, 2048, False, 0.3, 512
 
+
+
+def _build_png_export_panel(current_mesh_state):
+    """Builds the collapsible "Save PNG" accordion: azimuth/elevation/resolution
+    controls, a live low-res preview (updates on slider release, not every drag tick,
+    so dragging doesn't hammer the renderer), a single-view PNG export, and a
+    one-click "Save Turnaround Set" that renders the same 6 canonical views used
+    everywhere else in this app. Call once per tab (components must be distinct per
+    tab); `current_mesh_state` is that tab's current_mesh gr.State (holds the
+    generated .glb path)."""
+    with gr.Accordion("Save PNG", open=False):
+        azim = gr.Slider(0, 360, value=0, step=5, label="Azimuth")
+        elev = gr.Slider(-90, 90, value=0, step=5, label="Elevation")
+        resolution = gr.Radio(["1024", "2048", "4096"], value="2048", label="Resolution")
+        preview = gr.Image(label="Preview", height=200, interactive=False)
+        save_btn = gr.Button("Save PNG", size="sm")
+        save_file = gr.File(label="Download PNG", visible=False)
+        turnaround_btn = gr.Button("Save Turnaround Set (6 views, zipped)", size="sm")
+        turnaround_file = gr.File(label="Download Turnaround Set", visible=False)
+
+        azim.release(fn=_preview_view, inputs=[current_mesh_state, elev, azim], outputs=preview)
+        elev.release(fn=_preview_view, inputs=[current_mesh_state, elev, azim], outputs=preview)
+
+        save_btn.click(
+            fn=_save_view_png, inputs=[current_mesh_state, elev, azim, resolution], outputs=save_file,
+        ).then(fn=lambda: gr.update(visible=True), outputs=save_file)
+
+        turnaround_btn.click(
+            fn=_save_turnaround_zip, inputs=[current_mesh_state, resolution], outputs=turnaround_file,
+        ).then(fn=lambda: gr.update(visible=True), outputs=turnaround_file)
+
+
+def _build_filter_panels():
+    """Builds the three per-filter settings panels (Dither/Stipple/Riso), each in its
+    own gr.Group with a Reset button, visibility toggled by the Filter dropdown. Call
+    once per tab (Gradio components must be distinct per tab).
+
+    Each panel is a plain, class-less gr.Column wrapping the actual bordered
+    gr.Group -- toggling visibility on the outer Column instead of directly on the
+    "quiet-box thin-box" Group. A thin-box Group renders as two nested divs that both
+    carry the border class (see the .thin-box CSS comment above); toggling visibility
+    directly on it left an empty bordered box on screen when "hidden" (only one of the
+    two divs actually collapsed). The outer Column has no border class of its own, so
+    hiding it leaves nothing behind."""
+    with gr.Column(visible=False) as dither_group:
+        with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+            gr.Markdown("**Dither settings**")
+            d_ao_strength = gr.Slider(0.5, 10.0, value=_dither_defaults.DEFAULT_AO_STRENGTH, step=0.1, label="AO Strength")
+            d_ao_gradient = gr.Slider(0.5, 15.0, value=_dither_defaults.DEFAULT_AO_GRADIENT_LENGTH, step=0.1, label="AO Gradient Length")
+            d_fine_detail = gr.Slider(0.0, 10.0, value=_dither_defaults.DEFAULT_FINE_DETAIL, step=0.1, label="Fine Detail")
+            d_crease_sensitivity = gr.Slider(5.0, 45.0, value=_dither_defaults.DEFAULT_CREASE_SENSITIVITY, step=1.0,
+                                              label="Crease Sensitivity", info="Lower catches more creases")
+            d_edge_strength = gr.Slider(0.0, 2.0, value=_dither_defaults.DEFAULT_EDGE_STRENGTH, step=0.05, label="Edge Strength")
+            d_edge_sensitivity = gr.Slider(10.0, 100.0, value=_dither_defaults.DEFAULT_EDGE_SENSITIVITY, step=1.0,
+                                            label="Edge Sensitivity", info="Lower catches more edges")
+            d_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
+
+    with gr.Column(visible=False) as stipple_group:
+        with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+            gr.Markdown("**Stipple settings**")
+            s_ao_strength = gr.Slider(0.5, 10.0, value=_stipple_defaults.DEFAULT_AO_STRENGTH, step=0.1, label="AO Strength")
+            s_ao_gradient = gr.Slider(0.5, 15.0, value=_stipple_defaults.DEFAULT_AO_GRADIENT_LENGTH, step=0.1, label="AO Gradient Length")
+            s_crease_sensitivity = gr.Slider(5.0, 45.0, value=_stipple_defaults.DEFAULT_CREASE_SENSITIVITY, step=1.0,
+                                              label="Crease Sensitivity", info="Lower catches more creases")
+            s_edge_strength = gr.Slider(0.0, 2.0, value=_stipple_defaults.DEFAULT_EDGE_STRENGTH, step=0.05, label="Edge Strength")
+            s_dot_density = gr.Slider(0.25, 3.0, value=_stipple_defaults.DEFAULT_DOT_DENSITY, step=0.05, label="Dot Density")
+            s_dot_size = gr.Slider(0.25, 3.0, value=_stipple_defaults.DEFAULT_DOT_SIZE, step=0.05, label="Dot Size")
+            s_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
+
+    with gr.Column(visible=False) as riso_group:
+        with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+            gr.Markdown("**Riso settings**")
+            r_ao_strength = gr.Slider(0.5, 10.0, value=_riso_defaults.DEFAULT_AO_STRENGTH, step=0.1, label="AO Strength")
+            r_ao_gradient = gr.Slider(0.5, 15.0, value=_riso_defaults.DEFAULT_AO_GRADIENT_LENGTH, step=0.1, label="AO Gradient Length")
+            r_fine_detail = gr.Slider(0.0, 10.0, value=_riso_defaults.DEFAULT_FINE_DETAIL, step=0.1, label="Fine Detail")
+            r_crease_sensitivity = gr.Slider(5.0, 45.0, value=_riso_defaults.DEFAULT_CREASE_SENSITIVITY, step=1.0,
+                                              label="Crease Sensitivity", info="Lower catches more creases")
+            r_edge_sensitivity = gr.Slider(10.0, 100.0, value=_riso_defaults.DEFAULT_EDGE_SENSITIVITY, step=1.0,
+                                            label="Edge Sensitivity", info="Lower catches more edges")
+            with gr.Row(elem_classes=["filter-color-row"]):
+                r_color_shadow = gr.ColorPicker(value="#0078BF", label="Shadow Color")
+                r_color_detail = gr.ColorPicker(value="#FF48B0", label="Detail Color")
+                r_paper_color = gr.ColorPicker(value="#F6F2E8", label="Paper Color")
+            r_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
+
+    dither_params = [d_ao_strength, d_ao_gradient, d_fine_detail, d_crease_sensitivity, d_edge_strength, d_edge_sensitivity]
+    dither_defaults = (_dither_defaults.DEFAULT_AO_STRENGTH, _dither_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+                        _dither_defaults.DEFAULT_FINE_DETAIL, _dither_defaults.DEFAULT_CREASE_SENSITIVITY,
+                        _dither_defaults.DEFAULT_EDGE_STRENGTH, _dither_defaults.DEFAULT_EDGE_SENSITIVITY)
+    d_reset_btn.click(fn=lambda: dither_defaults, outputs=dither_params)
+
+    stipple_params = [s_ao_strength, s_ao_gradient, s_crease_sensitivity, s_edge_strength, s_dot_density, s_dot_size]
+    stipple_defaults = (_stipple_defaults.DEFAULT_AO_STRENGTH, _stipple_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+                         _stipple_defaults.DEFAULT_CREASE_SENSITIVITY, _stipple_defaults.DEFAULT_EDGE_STRENGTH,
+                         _stipple_defaults.DEFAULT_DOT_DENSITY, _stipple_defaults.DEFAULT_DOT_SIZE)
+    s_reset_btn.click(fn=lambda: stipple_defaults, outputs=stipple_params)
+
+    riso_params = [r_ao_strength, r_ao_gradient, r_fine_detail, r_crease_sensitivity, r_edge_sensitivity,
+                   r_color_shadow, r_color_detail, r_paper_color]
+    riso_defaults = (_riso_defaults.DEFAULT_AO_STRENGTH, _riso_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+                      _riso_defaults.DEFAULT_FINE_DETAIL, _riso_defaults.DEFAULT_CREASE_SENSITIVITY,
+                      _riso_defaults.DEFAULT_EDGE_SENSITIVITY, "#0078BF", "#FF48B0", "#F6F2E8")
+    r_reset_btn.click(fn=lambda: riso_defaults, outputs=riso_params)
+
+    return {
+        "groups": (dither_group, stipple_group, riso_group),
+        "dither_params": dither_params,
+        "stipple_params": stipple_params,
+        "riso_params": riso_params,
+    }
 
 
 def _simplify_current(glb_path, target_faces, progress=gr.Progress()):
@@ -897,6 +1146,25 @@ button {
 .quiet-box .row .form > .block:not(:first-child) {
     padding-left: 1rem !important;
 }
+/* Filter settings panels (Dither/Stipple/Riso): extra breathing room above the
+   Reset button and the Riso color-picker row, so they don't crowd the slider
+   directly above them the way the default 0.6rem row spacing does. */
+.filter-reset-btn {
+    margin-top: 1rem !important;
+}
+.filter-color-row {
+    margin-top: 1rem !important;
+}
+/* Generate/Re-texture button pair: the parent Column's default 28px flex gap (see
+   quiet-box's own comment above) reads as too much space between two buttons that
+   are directly related actions -- a third of that (~9px) keeps them visually paired
+   without touching any other spacing in the layout. */
+.tight-gap {
+    gap: 9px !important;
+}
+.tight-gap button {
+    margin-top: 0 !important;
+}
 
 /* .thin-box groups (Shape / Texture) carry their own 1px outer border, so
    the per-row divider lines that .quiet-box draws between controls become a
@@ -909,13 +1177,6 @@ button {
 .thin-box .row .form > .block {
     border-bottom: none !important;
     border-right: none !important;
-}
-
-/* Extra breathing room between "Randomize seed" and the Re-texture button
-   right below it — they otherwise sit at the same tight spacing as every
-   other control row. */
-#retexture-btn, #retexture-btn-t2 {
-    margin-top: 1rem !important;
 }
 
 .label-wrap, .accordion .label-wrap span {
@@ -988,7 +1249,9 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                     label="Input Image",
                     height=300,
                 )
-                generate_btn = gr.Button("Generate", variant="primary", size="lg")
+                with gr.Column(elem_classes=["tight-gap"]):
+                    generate_btn = gr.Button("Generate", variant="primary", size="lg")
+                    retexture_btn = gr.Button("Re-texture", variant="primary", size="lg", elem_id="retexture-btn")
 
                 with gr.Row(elem_classes="preset-row"):
                     btn_lowpoly = gr.Button("Lowpoly", size="sm")
@@ -1038,6 +1301,19 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                     )
 
                 with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+                    paint_res = gr.Slider(minimum=256, maximum=1024, value=512, step=64, label="Paint Resolution")
+                    paint_steps = gr.Slider(minimum=1, maximum=30, value=15, step=1, label="Paint Steps")
+                    paint_tex = gr.Slider(minimum=256, maximum=4096, value=2048, step=256, label="Paint Texture Size")
+                    # Hidden — no longer user-adjustable, but still preset-dependent (paint_guidance)
+                    # or fixed across all presets (the rest), so kept as plumbing rather than
+                    # hardcoded, since presets set these via the same outputs mechanism.
+                    use_swift_paint = gr.State(value=True)
+                    paint_guidance = gr.State(value=1.5)
+                    paint_superres = gr.State(value=False)
+                    paint_sd_strength = gr.State(value=0.3)
+                    paint_sd_res = gr.State(value=512)
+
+                with gr.Group(elem_classes=["quiet-box", "thin-box"]):
                     use_delight = gr.Checkbox(
                         value=False,
                         label="Remove lighting (Delight)",
@@ -1066,25 +1342,23 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                         info="Stylized post-process on the finished texture (1-bit AO-driven dither)",
                     )
 
-                with gr.Group(elem_classes=["quiet-box", "thin-box"]):
-                    paint_res = gr.Slider(minimum=256, maximum=1024, value=512, step=64, label="Paint Resolution")
-                    paint_steps = gr.Slider(minimum=1, maximum=30, value=15, step=1, label="Paint Steps")
-                    paint_tex = gr.Slider(minimum=256, maximum=4096, value=2048, step=256, label="Paint Texture Size")
-                    retexture_btn = gr.Button("Re-texture", variant="primary", size="lg", elem_id="retexture-btn")
-                    # Hidden — no longer user-adjustable, but still preset-dependent (paint_guidance)
-                    # or fixed across all presets (the rest), so kept as plumbing rather than
-                    # hardcoded, since presets set these via the same outputs mechanism.
-                    use_swift_paint = gr.State(value=True)
-                    paint_guidance = gr.State(value=1.5)
-                    paint_superres = gr.State(value=False)
-                    paint_sd_strength = gr.State(value=0.3)
-                    paint_sd_res = gr.State(value=512)
+                _filter_panels = _build_filter_panels()
+                dither_params, stipple_params, riso_params = (
+                    _filter_panels["dither_params"], _filter_panels["stipple_params"], _filter_panels["riso_params"]
+                )
+                filter_style.change(
+                    fn=lambda f: (gr.update(visible=f == "Dither"), gr.update(visible=f == "Stipple"),
+                                  gr.update(visible=f == "Riso")),
+                    inputs=filter_style,
+                    outputs=list(_filter_panels["groups"]),
+                )
 
             with gr.Column(scale=1):
                 current_mesh = gr.State()
                 output_3d = gr.Model3D(label="Result", height=600, elem_id="output-viewer-1")
                 output_file = gr.File(label="Download .glb")
                 output_obj = gr.File(label="Download .obj (zipped)")
+                _build_png_export_panel(current_mesh)
 
         _preset_outputs = [
             shape_steps, shape_octree_resolution, use_delight, simplify_before,
@@ -1119,6 +1393,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_sd_res,
                 enable_pbr,
                 filter_style,
+                *dither_params, *stipple_params, *riso_params,
             ],
             outputs=[output_3d, output_file, output_obj, current_mesh],
         ).then(fn=_get_memory_stats, outputs=memory_label)
@@ -1132,6 +1407,26 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             paint_superres=False, paint_sd_strength=0.3, paint_sd_res=768,
             enable_pbr=False,
             filter_style="None",
+            dither_ao_strength=_dither_defaults.DEFAULT_AO_STRENGTH,
+            dither_ao_gradient=_dither_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+            dither_fine_detail=_dither_defaults.DEFAULT_FINE_DETAIL,
+            dither_crease_sensitivity=_dither_defaults.DEFAULT_CREASE_SENSITIVITY,
+            dither_edge_strength=_dither_defaults.DEFAULT_EDGE_STRENGTH,
+            dither_edge_sensitivity=_dither_defaults.DEFAULT_EDGE_SENSITIVITY,
+            stipple_ao_strength=_stipple_defaults.DEFAULT_AO_STRENGTH,
+            stipple_ao_gradient=_stipple_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+            stipple_crease_sensitivity=_stipple_defaults.DEFAULT_CREASE_SENSITIVITY,
+            stipple_edge_strength=_stipple_defaults.DEFAULT_EDGE_STRENGTH,
+            stipple_dot_density=_stipple_defaults.DEFAULT_DOT_DENSITY,
+            stipple_dot_size=_stipple_defaults.DEFAULT_DOT_SIZE,
+            riso_ao_strength=_riso_defaults.DEFAULT_AO_STRENGTH,
+            riso_ao_gradient=_riso_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+            riso_fine_detail=_riso_defaults.DEFAULT_FINE_DETAIL,
+            riso_crease_sensitivity=_riso_defaults.DEFAULT_CREASE_SENSITIVITY,
+            riso_edge_sensitivity=_riso_defaults.DEFAULT_EDGE_SENSITIVITY,
+            riso_color_shadow="#0078BF",
+            riso_color_detail="#FF48B0",
+            riso_paper_color="#F6F2E8",
             progress=gr.Progress(),
         ):
             global _last_original_inputs
@@ -1145,6 +1440,13 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_superres, paint_sd_strength, paint_sd_res,
                 enable_pbr,
                 filter_style,
+                dither_ao_strength, dither_ao_gradient, dither_fine_detail,
+                dither_crease_sensitivity, dither_edge_strength, dither_edge_sensitivity,
+                stipple_ao_strength, stipple_ao_gradient, stipple_crease_sensitivity,
+                stipple_edge_strength, stipple_dot_density, stipple_dot_size,
+                riso_ao_strength, riso_ao_gradient, riso_fine_detail,
+                riso_crease_sensitivity, riso_edge_sensitivity,
+                riso_color_shadow, riso_color_detail, riso_paper_color,
                 progress=progress,
             )
 
@@ -1158,6 +1460,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_superres, paint_sd_strength, paint_sd_res,
                 enable_pbr,
                 filter_style,
+                *dither_params, *stipple_params, *riso_params,
             ],
             outputs=[output_3d, output_file, output_obj, current_mesh],
         ).then(fn=_get_memory_stats, outputs=memory_label)
@@ -1186,7 +1489,9 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                     label="Generated Image",
                     height=300,
                 )
-                gen_3d_btn = gr.Button("Generate 3D from Image", variant="primary", size="lg")
+                with gr.Column(elem_classes=["tight-gap"]):
+                    gen_3d_btn = gr.Button("Generate 3D from Image", variant="primary", size="lg")
+                    retexture_btn_t2 = gr.Button("Re-texture", variant="primary", size="lg", elem_id="retexture-btn-t2")
 
                 with gr.Row(elem_classes="preset-row"):
                     btn_lowpoly_t2 = gr.Button("Lowpoly", size="sm")
@@ -1236,6 +1541,16 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                     )
 
                 with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+                    paint_res_t2 = gr.Slider(minimum=256, maximum=1024, value=512, step=64, label="Paint Resolution")
+                    paint_steps_t2 = gr.Slider(minimum=1, maximum=30, value=15, step=1, label="Paint Steps")
+                    paint_tex_t2 = gr.Slider(minimum=256, maximum=4096, value=2048, step=256, label="Paint Texture Size")
+                    use_swift_paint_t2 = gr.State(value=True)
+                    paint_guidance_t2 = gr.State(value=1.5)
+                    paint_superres_t2 = gr.State(value=False)
+                    paint_sd_strength_t2 = gr.State(value=0.3)
+                    paint_sd_res_t2 = gr.State(value=512)
+
+                with gr.Group(elem_classes=["quiet-box", "thin-box"]):
                     use_delight_t2 = gr.Checkbox(
                         value=False,
                         label="Remove lighting (Delight)",
@@ -1264,22 +1579,23 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                         info="Stylized post-process on the finished texture (1-bit AO-driven dither)",
                     )
 
-                with gr.Group(elem_classes=["quiet-box", "thin-box"]):
-                    paint_res_t2 = gr.Slider(minimum=256, maximum=1024, value=512, step=64, label="Paint Resolution")
-                    paint_steps_t2 = gr.Slider(minimum=1, maximum=30, value=15, step=1, label="Paint Steps")
-                    paint_tex_t2 = gr.Slider(minimum=256, maximum=4096, value=2048, step=256, label="Paint Texture Size")
-                    retexture_btn_t2 = gr.Button("Re-texture", variant="primary", size="lg", elem_id="retexture-btn-t2")
-                    use_swift_paint_t2 = gr.State(value=True)
-                    paint_guidance_t2 = gr.State(value=1.5)
-                    paint_superres_t2 = gr.State(value=False)
-                    paint_sd_strength_t2 = gr.State(value=0.3)
-                    paint_sd_res_t2 = gr.State(value=512)
+                _filter_panels_t2 = _build_filter_panels()
+                dither_params_t2, stipple_params_t2, riso_params_t2 = (
+                    _filter_panels_t2["dither_params"], _filter_panels_t2["stipple_params"], _filter_panels_t2["riso_params"]
+                )
+                filter_style_t2.change(
+                    fn=lambda f: (gr.update(visible=f == "Dither"), gr.update(visible=f == "Stipple"),
+                                  gr.update(visible=f == "Riso")),
+                    inputs=filter_style_t2,
+                    outputs=list(_filter_panels_t2["groups"]),
+                )
 
             with gr.Column(scale=1):
                 current_mesh_t2 = gr.State()
                 output_3d_t2 = gr.Model3D(label="Result", height=600, elem_id="output-viewer-2")
                 output_file_t2 = gr.File(label="Download .glb")
                 output_obj_t2 = gr.File(label="Download .obj (zipped)")
+                _build_png_export_panel(current_mesh_t2)
 
         gen_image_btn.click(
             fn=generate_image,
@@ -1298,6 +1614,26 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             paint_superres=False, paint_sd_strength=0.3, paint_sd_res=768,
             enable_pbr=False,
             filter_style="None",
+            dither_ao_strength=_dither_defaults.DEFAULT_AO_STRENGTH,
+            dither_ao_gradient=_dither_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+            dither_fine_detail=_dither_defaults.DEFAULT_FINE_DETAIL,
+            dither_crease_sensitivity=_dither_defaults.DEFAULT_CREASE_SENSITIVITY,
+            dither_edge_strength=_dither_defaults.DEFAULT_EDGE_STRENGTH,
+            dither_edge_sensitivity=_dither_defaults.DEFAULT_EDGE_SENSITIVITY,
+            stipple_ao_strength=_stipple_defaults.DEFAULT_AO_STRENGTH,
+            stipple_ao_gradient=_stipple_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+            stipple_crease_sensitivity=_stipple_defaults.DEFAULT_CREASE_SENSITIVITY,
+            stipple_edge_strength=_stipple_defaults.DEFAULT_EDGE_STRENGTH,
+            stipple_dot_density=_stipple_defaults.DEFAULT_DOT_DENSITY,
+            stipple_dot_size=_stipple_defaults.DEFAULT_DOT_SIZE,
+            riso_ao_strength=_riso_defaults.DEFAULT_AO_STRENGTH,
+            riso_ao_gradient=_riso_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+            riso_fine_detail=_riso_defaults.DEFAULT_FINE_DETAIL,
+            riso_crease_sensitivity=_riso_defaults.DEFAULT_CREASE_SENSITIVITY,
+            riso_edge_sensitivity=_riso_defaults.DEFAULT_EDGE_SENSITIVITY,
+            riso_color_shadow="#0078BF",
+            riso_color_detail="#FF48B0",
+            riso_paper_color="#F6F2E8",
             shape_backend=SHAPE_BACKEND_DEFAULT,
             progress=gr.Progress()
         ):
@@ -1313,6 +1649,16 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
                 paint_superres, paint_sd_strength, paint_sd_res,
                 enable_pbr=enable_pbr, filter_style=filter_style,
+                dither_ao_strength=dither_ao_strength, dither_ao_gradient=dither_ao_gradient,
+                dither_fine_detail=dither_fine_detail, dither_crease_sensitivity=dither_crease_sensitivity,
+                dither_edge_strength=dither_edge_strength, dither_edge_sensitivity=dither_edge_sensitivity,
+                stipple_ao_strength=stipple_ao_strength, stipple_ao_gradient=stipple_ao_gradient,
+                stipple_crease_sensitivity=stipple_crease_sensitivity, stipple_edge_strength=stipple_edge_strength,
+                stipple_dot_density=stipple_dot_density, stipple_dot_size=stipple_dot_size,
+                riso_ao_strength=riso_ao_strength, riso_ao_gradient=riso_ao_gradient,
+                riso_fine_detail=riso_fine_detail, riso_crease_sensitivity=riso_crease_sensitivity,
+                riso_edge_sensitivity=riso_edge_sensitivity, riso_color_shadow=riso_color_shadow,
+                riso_color_detail=riso_color_detail, riso_paper_color=riso_paper_color,
                 shape_backend=shape_backend, progress=progress,
             )
             return glb_path, glb_file, obj_zip, mesh_state
@@ -1339,6 +1685,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_sd_res_t2,
                 enable_pbr_t2,
                 filter_style_t2,
+                *dither_params_t2, *stipple_params_t2, *riso_params_t2,
             ],
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label)
@@ -1352,6 +1699,26 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             paint_superres=False, paint_sd_strength=0.3, paint_sd_res=768,
             enable_pbr=False,
             filter_style="None",
+            dither_ao_strength=_dither_defaults.DEFAULT_AO_STRENGTH,
+            dither_ao_gradient=_dither_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+            dither_fine_detail=_dither_defaults.DEFAULT_FINE_DETAIL,
+            dither_crease_sensitivity=_dither_defaults.DEFAULT_CREASE_SENSITIVITY,
+            dither_edge_strength=_dither_defaults.DEFAULT_EDGE_STRENGTH,
+            dither_edge_sensitivity=_dither_defaults.DEFAULT_EDGE_SENSITIVITY,
+            stipple_ao_strength=_stipple_defaults.DEFAULT_AO_STRENGTH,
+            stipple_ao_gradient=_stipple_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+            stipple_crease_sensitivity=_stipple_defaults.DEFAULT_CREASE_SENSITIVITY,
+            stipple_edge_strength=_stipple_defaults.DEFAULT_EDGE_STRENGTH,
+            stipple_dot_density=_stipple_defaults.DEFAULT_DOT_DENSITY,
+            stipple_dot_size=_stipple_defaults.DEFAULT_DOT_SIZE,
+            riso_ao_strength=_riso_defaults.DEFAULT_AO_STRENGTH,
+            riso_ao_gradient=_riso_defaults.DEFAULT_AO_GRADIENT_LENGTH,
+            riso_fine_detail=_riso_defaults.DEFAULT_FINE_DETAIL,
+            riso_crease_sensitivity=_riso_defaults.DEFAULT_CREASE_SENSITIVITY,
+            riso_edge_sensitivity=_riso_defaults.DEFAULT_EDGE_SENSITIVITY,
+            riso_color_shadow="#0078BF",
+            riso_color_detail="#FF48B0",
+            riso_paper_color="#F6F2E8",
             progress=gr.Progress(),
         ):
             global _last_original_inputs
@@ -1365,6 +1732,13 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_superres, paint_sd_strength, paint_sd_res,
                 enable_pbr,
                 filter_style,
+                dither_ao_strength, dither_ao_gradient, dither_fine_detail,
+                dither_crease_sensitivity, dither_edge_strength, dither_edge_sensitivity,
+                stipple_ao_strength, stipple_ao_gradient, stipple_crease_sensitivity,
+                stipple_edge_strength, stipple_dot_density, stipple_dot_size,
+                riso_ao_strength, riso_ao_gradient, riso_fine_detail,
+                riso_crease_sensitivity, riso_edge_sensitivity,
+                riso_color_shadow, riso_color_detail, riso_paper_color,
                 progress=progress,
             )
 
@@ -1378,6 +1752,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_superres_t2, paint_sd_strength_t2, paint_sd_res_t2,
                 enable_pbr_t2,
                 filter_style_t2,
+                *dither_params_t2, *stipple_params_t2, *riso_params_t2,
             ],
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label)

@@ -109,25 +109,48 @@ def _atkinson_dither(gray: np.ndarray) -> np.ndarray:
     return img
 
 
-def _albedo_edge_mask(albedo: Image.Image, size: int) -> np.ndarray:
+# User-facing defaults -- the locked recipe from the tuning session, exposed as the
+# "Reset" values for the six creative knobs the UI adjusts (see app.py). Everything
+# else in this module (dither_res, white_cap, canny blur, gamma) is an implementation
+# detail, not a look decision, and stays a fixed constant below.
+DEFAULT_AO_STRENGTH = _AO_BROAD_MULTIPLIER
+DEFAULT_AO_GRADIENT_LENGTH = _AO_BROAD_SIGMA
+DEFAULT_FINE_DETAIL = _AO_FINE_MULTIPLIER
+DEFAULT_CREASE_SENSITIVITY = _CREASE_ANGLE_DEG
+DEFAULT_EDGE_STRENGTH = _ALBEDO_DETAIL_STRENGTH
+DEFAULT_EDGE_SENSITIVITY = float(_ALBEDO_CANNY_LOW)
+
+
+def _albedo_edge_mask(albedo: Image.Image, size: int, canny_low: float) -> np.ndarray:
     """Canny edges of the painted albedo's own luminance -- clean, continuous ink
     linework tracing real paint/material boundaries (eyes, embroidery, marbling),
-    instead of a plain contrast-threshold's isolated speckled noise."""
+    instead of a plain contrast-threshold's isolated speckled noise. `canny_low` is
+    the single user-facing "edge sensitivity" knob; the high threshold is kept at the
+    tuned 3x ratio to the low one rather than exposed separately."""
     small = albedo.convert("L").resize((size, size), Image.LANCZOS)
     gray_u8 = np.asarray(small, dtype=np.uint8)
     blurred = cv2.GaussianBlur(gray_u8, (0, 0), _ALBEDO_CANNY_BLUR)
-    edges = cv2.Canny(blurred, _ALBEDO_CANNY_LOW, _ALBEDO_CANNY_HIGH)
+    edges = cv2.Canny(blurred, canny_low, canny_low * 3)
     return (edges > 0).astype(np.float32)
 
 
-def apply_dither_filter(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+def apply_dither_filter(mesh: trimesh.Trimesh,
+                         ao_strength: float = DEFAULT_AO_STRENGTH,
+                         ao_gradient_length: float = DEFAULT_AO_GRADIENT_LENGTH,
+                         fine_detail: float = DEFAULT_FINE_DETAIL,
+                         crease_sensitivity: float = DEFAULT_CREASE_SENSITIVITY,
+                         edge_strength: float = DEFAULT_EDGE_STRENGTH,
+                         edge_sensitivity: float = DEFAULT_EDGE_SENSITIVITY) -> trimesh.Trimesh:
     """Replaces `mesh`'s painted albedo entirely with a stylized 1-bit Atkinson dither
     texture, driven by real AO + baked creases + thresholded albedo detail (see module
     docstring). `mesh.visual.material` must already be a trimesh material with
     `baseColorTexture` set (i.e. already painted). Returns `mesh` for convenience; also
     mutates it. This is a purely visual/stylized replacement, so the material is reset
     to flat/matte (no metallic/roughness/AO/normal maps -- those describe a real
-    surface's light response, which doesn't apply to a flat black/white graphic)."""
+    surface's light response, which doesn't apply to a flat black/white graphic).
+
+    The six keyword args are the user-facing "creative" knobs (see app.py's Dither
+    panel); everything else in this module is a fixed implementation detail."""
     material = mesh.visual.material
     albedo_tex = material.baseColorTexture.convert("RGB")
     texture_size = albedo_tex.size[0]
@@ -137,21 +160,21 @@ def apply_dither_filter(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     render.load_mesh(mesh)
 
     ao_raw = raycast_ao_raw(mesh, render)
-    ao_broad = gaussian_filter(ao_raw, sigma=_AO_BROAD_SIGMA)
+    ao_broad = gaussian_filter(ao_raw, sigma=ao_gradient_length)
     ao_fine = gaussian_filter(ao_raw, sigma=_AO_FINE_SIGMA)
-    darkness_broad = np.clip((1 - np.clip(ao_broad, 0, 1) ** _GAMMA) * _AO_BROAD_MULTIPLIER, 0, 1)
-    darkness_fine = np.clip((1 - np.clip(ao_fine, 0, 1) ** _GAMMA) * _AO_FINE_MULTIPLIER, 0, 1)
+    darkness_broad = np.clip((1 - np.clip(ao_broad, 0, 1) ** _GAMMA) * ao_strength, 0, 1)
+    darkness_fine = np.clip((1 - np.clip(ao_fine, 0, 1) ** _GAMMA) * fine_detail, 0, 1)
     darkness_ao = np.maximum(darkness_broad, darkness_fine)
 
-    crease = bake_crease_map(mesh, render, angle_deg=_CREASE_ANGLE_DEG)
+    crease = bake_crease_map(mesh, render, angle_deg=crease_sensitivity)
     darkness_crease = crease * _CREASE_STRENGTH
 
     combined_hires = np.maximum(darkness_ao, darkness_crease)
     combined_small = np.array(Image.fromarray((combined_hires * 255).astype(np.uint8)).resize(
         (_DITHER_RES, _DITHER_RES), Image.LANCZOS)) / 255.0
 
-    detail_mask = _albedo_edge_mask(albedo_tex, _DITHER_RES)
-    darkness_small = np.clip(combined_small + _ALBEDO_DETAIL_STRENGTH * detail_mask, 0, 1)
+    detail_mask = _albedo_edge_mask(albedo_tex, _DITHER_RES, edge_sensitivity)
+    darkness_small = np.clip(combined_small + edge_strength * detail_mask, 0, 1)
     brightness_small = np.clip(1 - darkness_small, 0, _WHITE_CAP)
 
     dithered_small = _atkinson_dither(brightness_small)

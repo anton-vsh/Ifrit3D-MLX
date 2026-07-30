@@ -62,15 +62,28 @@ _SPACING_MAX = 3.5
 _MAX_ATTEMPTS = 1_500_000
 
 
-def _build_darkness_map(mesh: trimesh.Trimesh, render, albedo: Image.Image) -> np.ndarray:
+# User-facing defaults -- the locked recipe, exposed as "Reset" values for the six
+# creative knobs the UI adjusts (see app.py). Everything else here (work_res, canvas
+# size, supersample, hp sigma/percentile) is a fixed implementation detail.
+DEFAULT_AO_STRENGTH = _AO_MULTIPLIER
+DEFAULT_AO_GRADIENT_LENGTH = _BLUR_SIGMA
+DEFAULT_CREASE_SENSITIVITY = _CREASE_ANGLE_DEG
+DEFAULT_EDGE_STRENGTH = _ALBEDO_DETAIL_STRENGTH
+DEFAULT_DOT_DENSITY = 1.0
+DEFAULT_DOT_SIZE = 1.0
+
+
+def _build_darkness_map(mesh: trimesh.Trimesh, render, albedo: Image.Image,
+                         ao_strength: float, ao_gradient_length: float,
+                         crease_sensitivity: float, edge_strength: float) -> np.ndarray:
     """AO + crease + thresholded-albedo-detail, combined into one darkness map at
     _WORK_RES. See dither_filter.py's module docstring for what each signal is for."""
     ao_raw = raycast_ao_raw(mesh, render)
-    ao_raw = gaussian_filter(ao_raw, sigma=_BLUR_SIGMA)
+    ao_raw = gaussian_filter(ao_raw, sigma=ao_gradient_length)
     ao_contrast = np.clip(ao_raw, 0, 1) ** _GAMMA
-    darkness_ao = np.clip((1 - ao_contrast) * _AO_MULTIPLIER, 0, 1)
+    darkness_ao = np.clip((1 - ao_contrast) * ao_strength, 0, 1)
 
-    crease = bake_crease_map(mesh, render, angle_deg=_CREASE_ANGLE_DEG)
+    crease = bake_crease_map(mesh, render, angle_deg=crease_sensitivity)
     darkness_crease = crease * _CREASE_STRENGTH
 
     combined_hires = np.maximum(darkness_ao, darkness_crease)
@@ -83,17 +96,25 @@ def _build_darkness_map(mesh: trimesh.Trimesh, render, albedo: Image.Image) -> n
     cutoff = np.percentile(hp, _ALBEDO_THRESHOLD_PERCENTILE)
     detail_mask = (hp > cutoff).astype(np.float32)
 
-    return np.clip(combined_small + _ALBEDO_DETAIL_STRENGTH * detail_mask, 0, 1)
+    return np.clip(combined_small + edge_strength * detail_mask, 0, 1)
 
 
-def _stipple_render(darkness: np.ndarray, seed: int = 0) -> Image.Image:
+def _stipple_render(darkness: np.ndarray, dot_density: float, dot_size: float,
+                     seed: int = 0) -> Image.Image:
     """Weighted dart-throwing stippling: darker regions get denser, slightly larger dots
-    (closer minimum spacing); brighter regions stay sparse/empty."""
+    (closer minimum spacing); brighter regions stay sparse/empty. `dot_density` scales
+    spacing inversely (>1 = tighter packing, more dots); `dot_size` scales dot radius
+    directly."""
+    spacing_min = _SPACING_MIN / dot_density
+    spacing_max = _SPACING_MAX / dot_density
+    r_min = _R_MIN * dot_size
+    r_max = _R_MAX * dot_size
+
     rng = np.random.default_rng(seed)
     hi = _CANVAS_SIZE * _SUPERSAMPLE
     h, w = darkness.shape
 
-    cell = _SPACING_MIN
+    cell = spacing_min
     grid = {}
 
     def grid_key(x, y):
@@ -120,11 +141,11 @@ def _stipple_render(darkness: np.ndarray, seed: int = 0) -> Image.Image:
             continue
         if rng.random() > d:
             continue
-        min_d = (_SPACING_MAX - (_SPACING_MAX - _SPACING_MIN) * d) * _SUPERSAMPLE
+        min_d = (spacing_max - (spacing_max - spacing_min) * d) * _SUPERSAMPLE
         if too_close(x, y, min_d):
             continue
         points.append((x, y))
-        radii.append((_R_MIN + (_R_MAX - _R_MIN) * d) * _SUPERSAMPLE)
+        radii.append((r_min + (r_max - r_min) * d) * _SUPERSAMPLE)
         grid.setdefault(grid_key(x, y), []).append((x, y))
 
     canvas = Image.new("L", (hi, hi), 255)
@@ -135,14 +156,23 @@ def _stipple_render(darkness: np.ndarray, seed: int = 0) -> Image.Image:
     return canvas.resize((_CANVAS_SIZE, _CANVAS_SIZE), Image.LANCZOS)
 
 
-def apply_stipple_filter(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+def apply_stipple_filter(mesh: trimesh.Trimesh,
+                          ao_strength: float = DEFAULT_AO_STRENGTH,
+                          ao_gradient_length: float = DEFAULT_AO_GRADIENT_LENGTH,
+                          crease_sensitivity: float = DEFAULT_CREASE_SENSITIVITY,
+                          edge_strength: float = DEFAULT_EDGE_STRENGTH,
+                          dot_density: float = DEFAULT_DOT_DENSITY,
+                          dot_size: float = DEFAULT_DOT_SIZE) -> trimesh.Trimesh:
     """Replaces `mesh`'s painted albedo entirely with a stylized ink-stipple texture,
     driven by real AO + baked creases + thresholded albedo detail (see module
     docstring). `mesh.visual.material` must already be a trimesh material with
     `baseColorTexture` set (i.e. already painted). Returns `mesh` for convenience; also
     mutates it. Purely visual/stylized replacement, so the material is reset to
     flat/matte (no metallic/roughness/AO/normal maps -- those describe a real surface's
-    light response, which doesn't apply to a flat black/white graphic)."""
+    light response, which doesn't apply to a flat black/white graphic).
+
+    The six keyword args are the user-facing "creative" knobs (see app.py's Stipple
+    panel); everything else in this module is a fixed implementation detail."""
     material = mesh.visual.material
     albedo_tex = material.baseColorTexture.convert("RGB")
     texture_size = albedo_tex.size[0]
@@ -151,8 +181,10 @@ def apply_stipple_filter(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     render = MeshRender(texture_size=texture_size)
     render.load_mesh(mesh)
 
-    darkness = _build_darkness_map(mesh, render, albedo_tex)
-    stipple = _stipple_render(darkness)
+    darkness = _build_darkness_map(mesh, render, albedo_tex,
+                                    ao_strength, ao_gradient_length,
+                                    crease_sensitivity, edge_strength)
+    stipple = _stipple_render(darkness, dot_density, dot_size)
     stipple_tex = stipple.resize((texture_size, texture_size), Image.LANCZOS).convert("RGB")
 
     mesh.visual.material = trimesh.visual.material.PBRMaterial(
