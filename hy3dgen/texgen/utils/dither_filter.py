@@ -1,0 +1,168 @@
+# Hunyuan 3D is licensed under the TENCENT HUNYUAN NON-COMMERCIAL LICENSE AGREEMENT
+# except for the third-party components listed below.
+# Hunyuan 3D does not impose any additional limitations beyond what is outlined
+# in the repsective licenses of these third-party components.
+# Users must comply with all terms and conditions of original licenses of these third-party
+# components and must ensure that the usage of the third party components adheres to
+# all relevant laws and regulations.
+
+# For avoidance of doubts, Hunyuan 3D means the large language models and
+# their software and algorithms, including trained model weights, parameters (including
+# optimizer states), machine-learning model code, inference-enabling code, training-enabling code,
+# fine-tuning enabling code and other elements of the foregoing made publicly available
+# by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
+
+# 1-bit "old Mac" dither filter: replaces the mesh's painted albedo entirely with a
+# stylized black/white Atkinson (1984 MacPaint) error-diffusion dither, driven by real
+# geometric AO rather than the albedo's own colors -- an ordered/Bayer dither of the
+# painted texture directly was tried first and rejected: it produced severe moire
+# under 3D perspective (the fixed periodic grid beats against the viewing angle) and
+# reacted to arbitrary albedo color noise rather than the mesh's actual form. Atkinson's
+# error-diffusion isn't a fixed periodic pattern, so it doesn't moire the same way, and
+# driving it from AO means dot density tracks real crevices/curvature instead of paint.
+#
+# Three signals are combined into one "darkness" map before dithering:
+#   - AO (mesh_ao.raycast_ao_raw): the dominant shading signal, real hemisphere-raycast
+#     occlusion, combined at two blur scales -- a wide/broad pass so shadow transitions
+#     read as long, soft gradients rather than sharp cutoffs, PLUS a narrow/fine pass
+#     (much less blurred) so small real geometric detail (eye sockets, brow furrows,
+#     ear rims) survives instead of being smoothed away by the broad pass alone. Each
+#     scale's darkness is multiplied (not gamma'd) so partially-occluded areas push
+#     toward full black without flattening open/convex areas, which stay genuinely
+#     white; the two scales are combined by max so neither washes out the other.
+#   - crease (mesh_crease.bake_crease_map): a static substitute for a view-dependent
+#     silhouette outline (which can't be baked -- see conversation/commit history) --
+#     fixed hard mesh creases (dihedral angle above a threshold) get a permanent edge
+#     line regardless of camera angle.
+#   - albedo edge detail: Canny edge detection (not a plain high-pass threshold) on the
+#     *painted* albedo's own luminance, so real painted detail (eyes, embroidery,
+#     marbling, carved texture) shows up as clean, continuous ink linework -- a plain
+#     percentile-threshold high-pass was tried first and rejected: it produced isolated
+#     speckled noise (many scattered single-pixel-ish blobs) rather than connected lines,
+#     since a per-pixel contrast threshold has no notion of an edge as a continuous
+#     structure. Canny's non-max-suppression + hysteresis linking gives clean traced
+#     edges instead.
+#
+# Settings below are the result of an extended interactive tuning session (see
+# conversation/commit history) across three very different test meshes (smooth glazed
+# porcelain, an ornate mixed-material figurine, a sculpted marble bust) -- this is not
+# exposed as user-facing parameters (yet), just the single "Dither" filter option.
+
+import cv2
+import numpy as np
+import trimesh
+from PIL import Image
+from scipy.ndimage import gaussian_filter
+
+from .mesh_ao import raycast_ao_raw
+from .mesh_crease import bake_crease_map
+
+_AO_BROAD_SIGMA = 6.0
+_AO_FINE_SIGMA = 1.0
+_AO_BROAD_MULTIPLIER = 4.0
+_AO_FINE_MULTIPLIER = 3.0
+_GAMMA = 0.6
+_WHITE_CAP = 0.85
+_CREASE_ANGLE_DEG = 15.0
+_CREASE_STRENGTH = 1.0
+_ALBEDO_DETAIL_STRENGTH = 0.75
+_ALBEDO_CANNY_BLUR = 1.0
+_ALBEDO_CANNY_LOW = 40
+_ALBEDO_CANNY_HIGH = 120
+# 1024, not 512: the final NEAREST upscale to texture_size (2048) tiles each
+# dither-resolution pixel into a flat block -- invisible where the darkness signal is
+# smooth (AO/crease), but wherever the albedo-detail layer has genuine fine paint
+# texture (e.g. marbling), a coarser dither_res made those blocks visible as blocky/
+# jagged "triangular" artifacts under perspective on a curved surface. 1024 halves the
+# upscale factor (4x -> 2x) and the blockiness disappears; higher still may look even
+# cleaner but costs more (Atkinson's error-diffusion loop is O(dither_res^2) in pure
+# Python).
+_DITHER_RES = 1024
+
+
+def _atkinson_dither(gray: np.ndarray) -> np.ndarray:
+    """Classic 1984 Apple/MacPaint error-diffusion dither. Only 6/8 of the quantization
+    error is distributed (vs Floyd-Steinberg's full 8/8) -- the discarded 2/8 is what
+    gives Atkinson its higher-contrast, slightly "cleaner" look, and its non-periodic
+    (image-dependent) error pattern avoids the fixed-grid moire that ordered/Bayer
+    dithering produces under 3D perspective."""
+    img = gray.astype(np.float32).copy()
+    h, w = img.shape
+    for y in range(h):
+        for x in range(w):
+            old = img[y, x]
+            new = 1.0 if old > 0.5 else 0.0
+            err = (old - new) / 8.0
+            img[y, x] = new
+            if x + 1 < w:
+                img[y, x + 1] += err
+            if x + 2 < w:
+                img[y, x + 2] += err
+            if y + 1 < h:
+                if x - 1 >= 0:
+                    img[y + 1, x - 1] += err
+                img[y + 1, x] += err
+                if x + 1 < w:
+                    img[y + 1, x + 1] += err
+            if y + 2 < h:
+                img[y + 2, x] += err
+    return img
+
+
+def _albedo_edge_mask(albedo: Image.Image, size: int) -> np.ndarray:
+    """Canny edges of the painted albedo's own luminance -- clean, continuous ink
+    linework tracing real paint/material boundaries (eyes, embroidery, marbling),
+    instead of a plain contrast-threshold's isolated speckled noise."""
+    small = albedo.convert("L").resize((size, size), Image.LANCZOS)
+    gray_u8 = np.asarray(small, dtype=np.uint8)
+    blurred = cv2.GaussianBlur(gray_u8, (0, 0), _ALBEDO_CANNY_BLUR)
+    edges = cv2.Canny(blurred, _ALBEDO_CANNY_LOW, _ALBEDO_CANNY_HIGH)
+    return (edges > 0).astype(np.float32)
+
+
+def apply_dither_filter(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Replaces `mesh`'s painted albedo entirely with a stylized 1-bit Atkinson dither
+    texture, driven by real AO + baked creases + thresholded albedo detail (see module
+    docstring). `mesh.visual.material` must already be a trimesh material with
+    `baseColorTexture` set (i.e. already painted). Returns `mesh` for convenience; also
+    mutates it. This is a purely visual/stylized replacement, so the material is reset
+    to flat/matte (no metallic/roughness/AO/normal maps -- those describe a real
+    surface's light response, which doesn't apply to a flat black/white graphic)."""
+    material = mesh.visual.material
+    albedo_tex = material.baseColorTexture.convert("RGB")
+    texture_size = albedo_tex.size[0]
+
+    from hy3dgen.texgen.differentiable_renderer.mesh_render import MeshRender
+    render = MeshRender(texture_size=texture_size)
+    render.load_mesh(mesh)
+
+    ao_raw = raycast_ao_raw(mesh, render)
+    ao_broad = gaussian_filter(ao_raw, sigma=_AO_BROAD_SIGMA)
+    ao_fine = gaussian_filter(ao_raw, sigma=_AO_FINE_SIGMA)
+    darkness_broad = np.clip((1 - np.clip(ao_broad, 0, 1) ** _GAMMA) * _AO_BROAD_MULTIPLIER, 0, 1)
+    darkness_fine = np.clip((1 - np.clip(ao_fine, 0, 1) ** _GAMMA) * _AO_FINE_MULTIPLIER, 0, 1)
+    darkness_ao = np.maximum(darkness_broad, darkness_fine)
+
+    crease = bake_crease_map(mesh, render, angle_deg=_CREASE_ANGLE_DEG)
+    darkness_crease = crease * _CREASE_STRENGTH
+
+    combined_hires = np.maximum(darkness_ao, darkness_crease)
+    combined_small = np.array(Image.fromarray((combined_hires * 255).astype(np.uint8)).resize(
+        (_DITHER_RES, _DITHER_RES), Image.LANCZOS)) / 255.0
+
+    detail_mask = _albedo_edge_mask(albedo_tex, _DITHER_RES)
+    darkness_small = np.clip(combined_small + _ALBEDO_DETAIL_STRENGTH * detail_mask, 0, 1)
+    brightness_small = np.clip(1 - darkness_small, 0, _WHITE_CAP)
+
+    dithered_small = _atkinson_dither(brightness_small)
+    dithered = np.array(Image.fromarray((dithered_small * 255).astype(np.uint8)).resize(
+        (texture_size, texture_size), Image.NEAREST))
+    dither_tex = Image.fromarray(np.repeat(dithered[..., None], 3, axis=-1), mode="RGB")
+
+    mesh.visual.material = trimesh.visual.material.PBRMaterial(
+        baseColorTexture=dither_tex,
+        baseColorFactor=[1.0, 1.0, 1.0, 1.0],
+        metallicFactor=0.0,
+        roughnessFactor=1.0,
+    )
+    return mesh

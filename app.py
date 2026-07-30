@@ -178,6 +178,7 @@ def _run_retexture(
     paint_sd_strength=0.3,
     paint_sd_res=768,
     enable_pbr=False,
+    filter_style="None",
     progress=gr.Progress(),
 ):
     if not glb_path:
@@ -226,13 +227,35 @@ def _run_retexture(
     textured = run_paint(mesh, image_paths, args, progress_callback=_scaled_progress(progress, 0.05, 0.9))
     print(f"[app] retexture done (seed={resolved_seed})")
 
-    if enable_pbr:
+    # The dither filter replaces the material entirely with a flat black/white texture,
+    # so PBR maps (metallic/roughness/AO/normal) would be computed only to be discarded
+    # immediately after -- skip that work whenever a filter is going to overwrite it.
+    if enable_pbr and filter_style == "None":
         progress(0.91, desc="Generating PBR maps (metallic/roughness/AO/normal)...")
         start = time.time()
         from hy3dgen.texgen.utils.postfactum_pbr import apply_postfactum_pbr
         from PIL import Image
         textured = apply_postfactum_pbr(textured, Image.open(image_paths[0]))
         print(f"[app] postfactum PBR done in {time.time() - start:.1f}s")
+
+    if filter_style == "Dither":
+        progress(0.92, desc="Applying dither filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.dither_filter import apply_dither_filter
+        textured = apply_dither_filter(textured)
+        print(f"[app] dither filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Stipple":
+        progress(0.92, desc="Applying stipple filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.stipple_filter import apply_stipple_filter
+        textured = apply_stipple_filter(textured)
+        print(f"[app] stipple filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Riso":
+        progress(0.92, desc="Applying riso filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.riso_filter import apply_riso_filter
+        textured = apply_riso_filter(textured)
+        print(f"[app] riso filter done in {time.time() - start:.1f}s")
 
     glb_out = run_dir / "result.glb"
     textured.export(glb_out)
@@ -264,6 +287,7 @@ def generate(
     paint_sd_strength=0.3,
     paint_sd_res=768,
     enable_pbr=False,
+    filter_style="None",
     shape_backend=SHAPE_BACKEND_DEFAULT,
     run_dir=None,
     progress=gr.Progress(),
@@ -355,12 +379,34 @@ def generate(
     textured = run_paint(mesh, image_paths, args, progress_callback=_scaled_progress(progress, 0.45, 0.88))
     print(f"[app] paint done in {time.time() - start:.1f}s")
 
-    if enable_pbr:
+    # The dither filter replaces the material entirely with a flat black/white texture,
+    # so PBR maps (metallic/roughness/AO/normal) would be computed only to be discarded
+    # immediately after -- skip that work whenever a filter is going to overwrite it.
+    if enable_pbr and filter_style == "None":
         progress(0.89, desc="Generating PBR maps (metallic/roughness/AO/normal)...")
         start = time.time()
         from hy3dgen.texgen.utils.postfactum_pbr import apply_postfactum_pbr
         textured = apply_postfactum_pbr(textured, img)
         print(f"[app] postfactum PBR done in {time.time() - start:.1f}s")
+
+    if filter_style == "Dither":
+        progress(0.895, desc="Applying dither filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.dither_filter import apply_dither_filter
+        textured = apply_dither_filter(textured)
+        print(f"[app] dither filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Stipple":
+        progress(0.895, desc="Applying stipple filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.stipple_filter import apply_stipple_filter
+        textured = apply_stipple_filter(textured)
+        print(f"[app] stipple filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Riso":
+        progress(0.895, desc="Applying riso filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.riso_filter import apply_riso_filter
+        textured = apply_riso_filter(textured)
+        print(f"[app] riso filter done in {time.time() - start:.1f}s")
 
     glb_path = run_dir / "result.glb"
     textured.export(glb_path)
@@ -1013,6 +1059,12 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                         label="Generate PBR maps (experimental)",
                         info="Postfactum estimation, adds 5-10s, may look off for some inputs",
                     )
+                    filter_style = gr.Dropdown(
+                        choices=["None", "Dither", "Stipple", "Riso"],
+                        value="None",
+                        label="Filter",
+                        info="Stylized post-process on the finished texture (1-bit AO-driven dither)",
+                    )
 
                 with gr.Group(elem_classes=["quiet-box", "thin-box"]):
                     paint_res = gr.Slider(minimum=256, maximum=1024, value=512, step=64, label="Paint Resolution")
@@ -1066,6 +1118,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_sd_strength,
                 paint_sd_res,
                 enable_pbr,
+                filter_style,
             ],
             outputs=[output_3d, output_file, output_obj, current_mesh],
         ).then(fn=_get_memory_stats, outputs=memory_label)
@@ -1078,6 +1131,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             paint_res=512, paint_steps=15, paint_guidance=2.0, paint_tex=2048,
             paint_superres=False, paint_sd_strength=0.3, paint_sd_res=768,
             enable_pbr=False,
+            filter_style="None",
             progress=gr.Progress(),
         ):
             global _last_original_inputs
@@ -1090,6 +1144,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
                 paint_superres, paint_sd_strength, paint_sd_res,
                 enable_pbr,
+                filter_style,
                 progress=progress,
             )
 
@@ -1102,6 +1157,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
                 paint_superres, paint_sd_strength, paint_sd_res,
                 enable_pbr,
+                filter_style,
             ],
             outputs=[output_3d, output_file, output_obj, current_mesh],
         ).then(fn=_get_memory_stats, outputs=memory_label)
@@ -1201,6 +1257,12 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                         label="Generate PBR maps (experimental)",
                         info="Postfactum estimation, adds 5-10s, may look off for some inputs",
                     )
+                    filter_style_t2 = gr.Dropdown(
+                        choices=["None", "Dither", "Stipple", "Riso"],
+                        value="None",
+                        label="Filter",
+                        info="Stylized post-process on the finished texture (1-bit AO-driven dither)",
+                    )
 
                 with gr.Group(elem_classes=["quiet-box", "thin-box"]):
                     paint_res_t2 = gr.Slider(minimum=256, maximum=1024, value=512, step=64, label="Paint Resolution")
@@ -1235,6 +1297,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             paint_res=512, paint_steps=15, paint_guidance=2.0, paint_tex=2048,
             paint_superres=False, paint_sd_strength=0.3, paint_sd_res=768,
             enable_pbr=False,
+            filter_style="None",
             shape_backend=SHAPE_BACKEND_DEFAULT,
             progress=gr.Progress()
         ):
@@ -1249,7 +1312,8 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 texture_sd_detail,
                 use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
                 paint_superres, paint_sd_strength, paint_sd_res,
-                enable_pbr=enable_pbr, shape_backend=shape_backend, progress=progress,
+                enable_pbr=enable_pbr, filter_style=filter_style,
+                shape_backend=shape_backend, progress=progress,
             )
             return glb_path, glb_file, obj_zip, mesh_state
 
@@ -1274,6 +1338,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_sd_strength_t2,
                 paint_sd_res_t2,
                 enable_pbr_t2,
+                filter_style_t2,
             ],
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label)
@@ -1286,6 +1351,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             paint_res=512, paint_steps=15, paint_guidance=2.0, paint_tex=2048,
             paint_superres=False, paint_sd_strength=0.3, paint_sd_res=768,
             enable_pbr=False,
+            filter_style="None",
             progress=gr.Progress(),
         ):
             global _last_original_inputs
@@ -1298,6 +1364,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
                 paint_superres, paint_sd_strength, paint_sd_res,
                 enable_pbr,
+                filter_style,
                 progress=progress,
             )
 
@@ -1310,6 +1377,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 use_swift_paint_t2, paint_res_t2, paint_steps_t2, paint_guidance_t2, paint_tex_t2,
                 paint_superres_t2, paint_sd_strength_t2, paint_sd_res_t2,
                 enable_pbr_t2,
+                filter_style_t2,
             ],
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label)

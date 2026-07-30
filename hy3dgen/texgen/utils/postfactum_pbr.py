@@ -50,12 +50,12 @@
 import threading
 
 import numpy as np
-import torch
 import trimesh
 from PIL import Image
 from scipy.ndimage import distance_transform_edt, gaussian_filter, sobel
 
 from .material_classifier import MaterialClassifier
+from .mesh_ao import raycast_ao_raw
 
 _CLASSIFIER_LOCK = threading.Lock()
 _classifier = None
@@ -70,66 +70,15 @@ def _get_material_classifier():
 
 
 def _bake_ao(mesh: trimesh.Trimesh, render, n_rays: int = 32, seed: int = 0) -> np.ndarray:
-    """Real geometric AO: dedup by position (UV-seam duplicates share a value for free),
-    smooth per-vertex normals (averaged over corner copies -- the raw per-corner normals on
-    this unwelded mesh convention are faceted, not smooth), one batched Embree raycast, baked
-    to UV space via the same interpolation machinery the pipeline already uses for position/
-    normal maps, then filled with the real reference inpaint. Returns HxW float32 in [0, 1].
-    `render` is a MeshRender with `mesh` already loaded (shared with the caller)."""
-    verts = mesh.vertices
-    rounded = verts.round(5)
-    uniq_pos, inverse = np.unique(rounded, axis=0, return_inverse=True)
-    inverse = inverse.reshape(-1)
-    n_uniq = len(uniq_pos)
-
-    corner_normals = mesh.vertex_normals
-    sum_n = np.zeros((n_uniq, 3), dtype=np.float64)
-    np.add.at(sum_n, inverse, corner_normals)
-    norm = np.linalg.norm(sum_n, axis=1, keepdims=True)
-    norm[norm < 1e-12] = 1
-    uniq_normals = (sum_n / norm).astype(np.float32)
-    uniq_verts = uniq_pos.astype(np.float32)
-
-    rng = np.random.default_rng(seed)
-    bbox_diag = np.linalg.norm(mesh.bounds[1] - mesh.bounds[0])
-    eps = bbox_diag * 1e-4
-
-    def cosine_hemisphere_batch(normals, k):
-        n = normals
-        ref = np.where(np.abs(n[:, :1]) < 0.9, np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]))
-        t = np.cross(ref, n)
-        t /= np.linalg.norm(t, axis=1, keepdims=True)
-        b = np.cross(n, t)
-        u1 = rng.random((len(n), k))
-        u2 = rng.random((len(n), k))
-        r = np.sqrt(u1)
-        theta = 2 * np.pi * u2
-        x = r * np.cos(theta)
-        y = r * np.sin(theta)
-        z = np.sqrt(np.maximum(0, 1 - u1))
-        return x[..., None] * t[:, None, :] + y[..., None] * b[:, None, :] + z[..., None] * n[:, None, :]
-
-    dirs = cosine_hemisphere_batch(uniq_normals, n_rays)
-    origins = np.broadcast_to((uniq_verts[:, None, :] + uniq_normals[:, None, :] * eps), dirs.shape).reshape(-1, 3)
-    dirs = dirs.reshape(-1, 3)
-    hits = mesh.ray.intersects_any(origins, dirs)
-    ao_uniq = 1.0 - hits.reshape(n_uniq, n_rays).mean(axis=1)
-    ao_full = ao_uniq[inverse].astype(np.float32)
-
-    ao_t = torch.from_numpy(ao_full).float().to(render.device).unsqueeze(-1).repeat(1, 3)
-    ones_t = torch.ones_like(ao_t)
-    ao_map_raw = render.uv_feature_map(ao_t).cpu().numpy()
-    mask_map = render.uv_feature_map(ones_t).cpu().numpy()[..., 0]
-    covered_mask = (mask_map > 0.5).astype(np.uint8) * 255
-
-    ao_tex = render.uv_inpaint(ao_map_raw, covered_mask)[..., 0].astype(np.float32) / 255.0
-    # sigma=3 (the original value) wasn't enough to smooth out the per-vertex raycast
-    # sampling noise on meshes with a lot of small-scale surface variation -- it read as
-    # patchy/confetti-like rather than a clean gradient. sigma=8 fixes that. Separately, AO
-    # here can reach literal 0 on genuinely deep concave geometry (e.g. the inside of a bowl
-    # -- that's correct occlusion, not a bug), but letting it multiply lighting all the way
-    # to black looks harsh; flooring at 0.35 is standard practice in production AO (real
-    # engines almost always clamp AO's influence rather than allow full black).
+    """Realistic-lighting AO: the shared raycast (see mesh_ao.raycast_ao_raw), blurred to
+    smooth per-vertex raycast sampling noise (sigma=3 wasn't enough on meshes with a lot of
+    small-scale surface variation -- read as patchy/confetti-like rather than a clean
+    gradient; sigma=8 fixes that), then floored. AO here can reach literal 0 on genuinely
+    deep concave geometry (e.g. the inside of a bowl -- that's correct occlusion, not a
+    bug), but letting it multiply lighting all the way to black looks harsh; flooring at
+    0.35 is standard practice in production AO (real engines almost always clamp AO's
+    influence rather than allow full black). Returns HxW float32 in [0.35, 1.0]."""
+    ao_tex = raycast_ao_raw(mesh, render, n_rays=n_rays, seed=seed)
     smoothed = gaussian_filter(ao_tex, sigma=8)
     return 0.35 + 0.65 * smoothed
 
