@@ -13,13 +13,17 @@
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
 # 1-bit "old Mac" dither filter: replaces the mesh's painted albedo entirely with a
-# stylized black/white Atkinson (1984 MacPaint) error-diffusion dither, driven by real
-# geometric AO rather than the albedo's own colors -- an ordered/Bayer dither of the
-# painted texture directly was tried first and rejected: it produced severe moire
+# stylized black/white Bayer (ordered) dither, driven by real geometric AO rather than
+# the albedo's own colors. An ordered/Bayer dither of the raw painted texture was tried
+# first, early in this feature's development, and rejected: it produced severe moire
 # under 3D perspective (the fixed periodic grid beats against the viewing angle) and
-# reacted to arbitrary albedo color noise rather than the mesh's actual form. Atkinson's
-# error-diffusion isn't a fixed periodic pattern, so it doesn't moire the same way, and
-# driving it from AO means dot density tracks real crevices/curvature instead of paint.
+# reacted to arbitrary albedo color noise rather than the mesh's actual form. Atkinson
+# (1984 MacPaint) error-diffusion was adopted instead, since its non-periodic pattern
+# doesn't moire the same way. Once the AO/crease/Canny-edge signal below matured,
+# though, Bayer was revisited on top of it (see conversation/commit history) and
+# explicitly chosen over Atkinson for the shipped "Dither" look despite the residual
+# moire risk on smooth/simple geometry -- Atkinson is still used by the Riso filter
+# (riso_filter.py imports `_atkinson_dither` from here), so both remain available.
 #
 # Three signals are combined into one "darkness" map before dithering:
 #   - AO (mesh_ao.raycast_ao_raw): the dominant shading signal, real hemisphere-raycast
@@ -75,9 +79,28 @@ _ALBEDO_CANNY_HIGH = 120
 # texture (e.g. marbling), a coarser dither_res made those blocks visible as blocky/
 # jagged "triangular" artifacts under perspective on a curved surface. 1024 halves the
 # upscale factor (4x -> 2x) and the blockiness disappears; higher still may look even
-# cleaner but costs more (Atkinson's error-diffusion loop is O(dither_res^2) in pure
-# Python).
+# cleaner but costs more (the ordered-dither tiling and Atkinson's error-diffusion
+# loop, used by the Riso filter, both scale with dither_res^2).
 _DITHER_RES = 1024
+
+
+# Classic 4x4 Bayer ordered-dither threshold matrix, values normalized to [0, 1).
+_BAYER4 = np.array([
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5],
+], dtype=np.float32) / 16.0
+
+
+def _bayer_dither(brightness: np.ndarray, matrix: np.ndarray = _BAYER4) -> np.ndarray:
+    """Ordered dither: tiles `matrix` across the image and thresholds each pixel
+    against its corresponding matrix cell, giving the classic regular halftone-grid
+    look (as opposed to Atkinson's non-periodic error-diffusion scatter)."""
+    h, w = brightness.shape
+    mh, mw = matrix.shape
+    tile = np.tile(matrix, (h // mh + 1, w // mw + 1))[:h, :w]
+    return (brightness > tile).astype(np.float32)
 
 
 def _atkinson_dither(gray: np.ndarray) -> np.ndarray:
@@ -141,9 +164,9 @@ def apply_dither_filter(mesh: trimesh.Trimesh,
                          crease_sensitivity: float = DEFAULT_CREASE_SENSITIVITY,
                          edge_strength: float = DEFAULT_EDGE_STRENGTH,
                          edge_sensitivity: float = DEFAULT_EDGE_SENSITIVITY) -> trimesh.Trimesh:
-    """Replaces `mesh`'s painted albedo entirely with a stylized 1-bit Atkinson dither
-    texture, driven by real AO + baked creases + thresholded albedo detail (see module
-    docstring). `mesh.visual.material` must already be a trimesh material with
+    """Replaces `mesh`'s painted albedo entirely with a stylized 1-bit Bayer (ordered)
+    dither texture, driven by real AO + baked creases + Canny-detected albedo detail
+    (see module docstring). `mesh.visual.material` must already be a trimesh material with
     `baseColorTexture` set (i.e. already painted). Returns `mesh` for convenience; also
     mutates it. This is a purely visual/stylized replacement, so the material is reset
     to flat/matte (no metallic/roughness/AO/normal maps -- those describe a real
@@ -177,7 +200,7 @@ def apply_dither_filter(mesh: trimesh.Trimesh,
     darkness_small = np.clip(combined_small + edge_strength * detail_mask, 0, 1)
     brightness_small = np.clip(1 - darkness_small, 0, _WHITE_CAP)
 
-    dithered_small = _atkinson_dither(brightness_small)
+    dithered_small = _bayer_dither(brightness_small)
     dithered = np.array(Image.fromarray((dithered_small * 255).astype(np.uint8)).resize(
         (texture_size, texture_size), Image.NEAREST))
     dither_tex = Image.fromarray(np.repeat(dithered[..., None], 3, axis=-1), mode="RGB")

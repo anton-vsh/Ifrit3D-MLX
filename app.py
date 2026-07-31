@@ -729,7 +729,15 @@ def _build_filter_panels():
     carry the border class (see the .thin-box CSS comment above); toggling visibility
     directly on it left an empty bordered box on screen when "hidden" (only one of the
     two divs actually collapsed). The outer Column has no border class of its own, so
-    hiding it leaves nothing behind."""
+    hiding it leaves nothing behind.
+
+    A pure client-side JS toggle (no Python round-trip) was tried here and reverted:
+    Gradio 6.19.0 only binds a component's `elem_id` onto its DOM node once that
+    component has actually been visible via a real server-side `visible=True` update at
+    least once -- a component that starts `visible=False` and is only ever toggled by
+    client-side JS never gets an addressable element to toggle in the first place. See
+    the call site's `queue=False` for the real fix to the "sometimes stops updating"
+    symptom this was chasing."""
     with gr.Column(visible=False) as dither_group:
         with gr.Group(elem_classes=["quiet-box", "thin-box"]):
             gr.Markdown("**Dither settings**")
@@ -1351,6 +1359,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                                   gr.update(visible=f == "Riso")),
                     inputs=filter_style,
                     outputs=list(_filter_panels["groups"]),
+                    queue=False,
                 )
 
             with gr.Column(scale=1):
@@ -1588,6 +1597,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                                   gr.update(visible=f == "Riso")),
                     inputs=filter_style_t2,
                     outputs=list(_filter_panels_t2["groups"]),
+                    queue=False,
                 )
 
             with gr.Column(scale=1):
