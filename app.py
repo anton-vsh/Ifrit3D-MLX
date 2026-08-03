@@ -23,6 +23,7 @@ import torch
 from hy3dgen.texgen.utils import dither_filter as _dither_defaults
 from hy3dgen.texgen.utils import stipple_filter as _stipple_defaults
 from hy3dgen.texgen.utils import riso_filter as _riso_defaults
+from hy3dgen.texgen.utils import haring_filter as _haring_defaults
 
 starlette.status.HTTP_422_UNPROCESSABLE_ENTITY = starlette.status.HTTP_422_UNPROCESSABLE_CONTENT
 
@@ -229,6 +230,13 @@ def _scaled_progress(progress, lo, hi):
     return _cb
 
 
+def _format_elapsed(verb, start):
+    elapsed = time.time() - start
+    if elapsed < 60:
+        return f"{verb} in {elapsed:.1f}s"
+    return f"{verb} in {int(elapsed // 60)}m {elapsed % 60:.0f}s"
+
+
 def _free_mps():
     import torch
     import gc
@@ -272,6 +280,9 @@ def _run_retexture(
     riso_color_shadow="#0078BF",
     riso_color_detail="#FF48B0",
     riso_paper_color="#F6F2E8",
+    haring_iterations=_haring_defaults.DEFAULT_ITERATIONS,
+    haring_density=_haring_defaults.DEFAULT_DENSITY,
+    haring_contrast=_haring_defaults.DEFAULT_CONTRAST,
     progress=gr.Progress(),
 ):
     if not glb_path:
@@ -279,6 +290,7 @@ def _run_retexture(
     if not image_paths_state:
         raise gr.Error("No input image found — generate a model first!")
 
+    total_start = time.time()
     _free_mps()
 
     from main import run_paint_pipeline as run_paint
@@ -362,6 +374,14 @@ def _run_retexture(
             color_detail=riso_color_detail, paper_color=riso_paper_color,
         )
         print(f"[app] riso filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Haring":
+        progress(0.92, desc="Applying haring filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.haring_filter import apply_haring_filter
+        textured = apply_haring_filter(
+            textured, iterations=haring_iterations, density=haring_density, contrast=haring_contrast,
+        )
+        print(f"[app] haring filter done in {time.time() - start:.1f}s")
 
     glb_out = run_dir / "result.glb"
     textured.export(glb_out)
@@ -371,7 +391,7 @@ def _run_retexture(
 
     progress(1.0, desc="Done!")
     _free_mps()
-    return str(glb_out), str(glb_out), obj_zip, str(glb_out)
+    return str(glb_out), str(glb_out), obj_zip, str(glb_out), _format_elapsed("Re-textured", total_start)
 
 
 def generate(
@@ -414,12 +434,16 @@ def generate(
     riso_color_shadow="#0078BF",
     riso_color_detail="#FF48B0",
     riso_paper_color="#F6F2E8",
+    haring_iterations=_haring_defaults.DEFAULT_ITERATIONS,
+    haring_density=_haring_defaults.DEFAULT_DENSITY,
+    haring_contrast=_haring_defaults.DEFAULT_CONTRAST,
     shape_backend=SHAPE_BACKEND_DEFAULT,
     run_dir=None,
     progress=gr.Progress(),
 ):
     global _last_original_input, _last_original_inputs
     _last_original_input = image_path
+    total_start = time.time()
 
     from PIL import Image
     from shape.runner import run_shape_pipeline as run_shape
@@ -498,7 +522,7 @@ def generate(
         obj_zip_path = _export_obj_zip(mesh, run_dir)
         progress(1.0, desc="Done!")
         _free_mps()
-        return str(glb_path), str(glb_path), obj_zip_path, str(glb_path)
+        return str(glb_path), str(glb_path), obj_zip_path, str(glb_path), _format_elapsed("Generated", total_start)
 
     progress(0.45, desc="Texturing...")
     start = time.time()
@@ -546,6 +570,14 @@ def generate(
             color_detail=riso_color_detail, paper_color=riso_paper_color,
         )
         print(f"[app] riso filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Haring":
+        progress(0.895, desc="Applying haring filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.haring_filter import apply_haring_filter
+        textured = apply_haring_filter(
+            textured, iterations=haring_iterations, density=haring_density, contrast=haring_contrast,
+        )
+        print(f"[app] haring filter done in {time.time() - start:.1f}s")
 
     glb_path = run_dir / "result.glb"
     textured.export(glb_path)
@@ -555,7 +587,7 @@ def generate(
 
     progress(1.0, desc="Done!")
     _free_mps()
-    return str(glb_path), str(glb_path), obj_zip_path, str(glb_path)
+    return str(glb_path), str(glb_path), obj_zip_path, str(glb_path), _format_elapsed("Generated", total_start)
 
 
 def _unweld_uvs(mesh):
@@ -676,15 +708,23 @@ def _simplify_mesh(mesh, target_faces):
 # target_faces, skip_texturing, texture_sd_detail, use_swift_paint,
 # paint_res, paint_steps, paint_guidance, paint_tex, paint_superres,
 # paint_sd_strength, paint_sd_res
-def _set_preset(name):
+def _set_preset(name, filter_style_value="None"):
     if name == "lowpoly":
-        return 8, 96, False, True, 500, False, False, True, 512, 4, 1.5, 256, False, 0.3, 512
+        vals = [8, 96, False, True, 500, False, False, True, 512, 4, 1.5, 256, False, 0.3, 512]
     elif name == "draft":
-        return 8, 160, False, True, 50000, False, False, True, 384, 10, 2, 1024, False, 0.3, 512
+        vals = [8, 160, False, True, 50000, False, False, True, 384, 10, 2, 1024, False, 0.3, 512]
     elif name == "normal":
-        return 8, 192, False, True, 100000, False, True, True, 512, 15, 1.5, 2048, False, 0.3, 512
+        vals = [8, 192, False, True, 100000, False, True, True, 512, 15, 1.5, 2048, False, 0.3, 512]
     else:  # high
-        return 8, 256, False, True, 180000, False, True, True, 512, 20, 1.5, 2048, False, 0.3, 512
+        vals = [8, 256, False, True, 180000, False, True, True, 512, 20, 1.5, 2048, False, 0.3, 512]
+    # index 11 is paint_tex -- a stylized filter's albedo-detail signal (see
+    # stipple_filter.py) is derived straight from the painted atlas, so a low-res atlas
+    # (the Lowpoly preset's default 256) starves it regardless of which preset button
+    # was pressed. Match the floor _filter_paint_tex_update already enforces when the
+    # Filter dropdown itself changes.
+    if filter_style_value != "None":
+        vals[11] = max(vals[11], _PAINT_TEX_MIN_WITH_FILTER)
+    return tuple(vals)
 
 
 
@@ -695,31 +735,51 @@ def _build_png_export_panel(current_mesh_state):
     one-click "Save Turnaround Set" that renders the same 6 canonical views used
     everywhere else in this app. Call once per tab (components must be distinct per
     tab); `current_mesh_state` is that tab's current_mesh gr.State (holds the
-    generated .glb path)."""
+    generated .glb path). Returns {"preview", "azim", "elev"} so the caller can chain
+    a `.then(fn=_preview_view, ...)` onto its generate/retexture click handlers, to
+    refresh the preview automatically once a new mesh lands rather than waiting for
+    the user to touch a slider first."""
     with gr.Accordion("Save PNG", open=False):
         azim = gr.Slider(0, 360, value=0, step=5, label="Azimuth")
         elev = gr.Slider(-90, 90, value=0, step=5, label="Elevation")
         resolution = gr.Radio(["1024", "2048", "4096"], value="2048", label="Resolution")
         preview = gr.Image(label="Preview", height=200, interactive=False)
-        save_btn = gr.Button("Save PNG", size="sm")
-        save_file = gr.File(label="Download PNG", visible=False)
-        turnaround_btn = gr.Button("Save Turnaround Set (6 views, zipped)", size="sm")
-        turnaround_file = gr.File(label="Download Turnaround Set", visible=False)
+        save_btn = gr.DownloadButton("Save PNG", size="sm")
+        turnaround_btn = gr.DownloadButton("Save Turnaround Set (6 views, zipped)", size="sm")
 
         azim.release(fn=_preview_view, inputs=[current_mesh_state, elev, azim], outputs=preview)
         elev.release(fn=_preview_view, inputs=[current_mesh_state, elev, azim], outputs=preview)
 
         save_btn.click(
-            fn=_save_view_png, inputs=[current_mesh_state, elev, azim, resolution], outputs=save_file,
-        ).then(fn=lambda: gr.update(visible=True), outputs=save_file)
+            fn=_save_view_png, inputs=[current_mesh_state, elev, azim, resolution], outputs=save_btn,
+        )
 
         turnaround_btn.click(
-            fn=_save_turnaround_zip, inputs=[current_mesh_state, resolution], outputs=turnaround_file,
-        ).then(fn=lambda: gr.update(visible=True), outputs=turnaround_file)
+            fn=_save_turnaround_zip, inputs=[current_mesh_state, resolution], outputs=turnaround_btn,
+        )
+
+        return {"preview": preview, "azim": azim, "elev": elev}
+
+
+_PAINT_TEX_MIN_NO_FILTER = 256
+_PAINT_TEX_MIN_WITH_FILTER = 1024
+
+
+def _filter_paint_tex_update(filter_style_value, current_tex):
+    """Raises the Paint Texture Size slider's floor to 1024 whenever a stylized filter
+    (Dither/Stipple/Riso/Haring) is selected -- all four filters derive their pattern
+    directly from the painted atlas (see stipple_filter.py's module docstring),
+    so a low-res atlas (e.g. the 256 the Lowpoly preset uses) starves that signal and
+    produces washed-out/blocky results no amount of filter tuning can fix. Bumps the
+    current value up to the new floor if it's below it; restores the full 256 floor
+    (without forcing the value back down) once no filter is selected."""
+    if filter_style_value == "None":
+        return gr.update(minimum=_PAINT_TEX_MIN_NO_FILTER)
+    return gr.update(minimum=_PAINT_TEX_MIN_WITH_FILTER, value=max(current_tex, _PAINT_TEX_MIN_WITH_FILTER))
 
 
 def _build_filter_panels():
-    """Builds the three per-filter settings panels (Dither/Stipple/Riso), each in its
+    """Builds the four per-filter settings panels (Dither/Stipple/Riso/Haring), each in its
     own gr.Group with a Reset button, visibility toggled by the Filter dropdown. Call
     once per tab (Gradio components must be distinct per tab).
 
@@ -735,9 +795,16 @@ def _build_filter_panels():
     Gradio 6.19.0 only binds a component's `elem_id` onto its DOM node once that
     component has actually been visible via a real server-side `visible=True` update at
     least once -- a component that starts `visible=False` and is only ever toggled by
-    client-side JS never gets an addressable element to toggle in the first place. See
-    the call site's `queue=False` for the real fix to the "sometimes stops updating"
-    symptom this was chasing."""
+    client-side JS never gets an addressable element to toggle in the first place.
+
+    The call site's dropdown `.change()` also had a `queue=False` "fix" at one point,
+    which was backwards: bypassing the queue let two rapid selections run as concurrent
+    unordered HTTP calls, so the *older* selection's response could land after the
+    newer one and leave a stale panel visible. Queuing (the default) with an explicit
+    `concurrency_limit=1` on its own `concurrency_id` serializes same-listener calls and
+    relies on `.change()`'s default `trigger_mode="always_last"` to coalesce rapid
+    switches -- that's what actually eliminates the race, without sharing a queue slot
+    with unrelated long-running jobs like `generate()`."""
     with gr.Column(visible=False) as dither_group:
         with gr.Group(elem_classes=["quiet-box", "thin-box"]):
             gr.Markdown("**Dither settings**")
@@ -779,6 +846,17 @@ def _build_filter_panels():
                 r_paper_color = gr.ColorPicker(value="#F6F2E8", label="Paper Color")
             r_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
 
+    with gr.Column(visible=False) as haring_group:
+        with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+            gr.Markdown("**Haring settings**")
+            h_iterations = gr.Slider(1, 80, value=_haring_defaults.DEFAULT_ITERATIONS, step=1, label="Iterations",
+                                      info="Pattern converges within a few dozen -- too few looks like a blurred photo")
+            h_density = gr.Slider(1.0, 12.0, value=_haring_defaults.DEFAULT_DENSITY, step=0.5, label="Density",
+                                   info="Larger = wider-spaced, chunkier bands")
+            h_contrast = gr.Slider(0.2, 2.5, value=_haring_defaults.DEFAULT_CONTRAST, step=0.1, label="Contrast",
+                                    info="Higher pushes the pattern to pure black/white faster")
+            h_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
+
     dither_params = [d_ao_strength, d_ao_gradient, d_fine_detail, d_crease_sensitivity, d_edge_strength, d_edge_sensitivity]
     dither_defaults = (_dither_defaults.DEFAULT_AO_STRENGTH, _dither_defaults.DEFAULT_AO_GRADIENT_LENGTH,
                         _dither_defaults.DEFAULT_FINE_DETAIL, _dither_defaults.DEFAULT_CREASE_SENSITIVITY,
@@ -798,11 +876,17 @@ def _build_filter_panels():
                       _riso_defaults.DEFAULT_EDGE_SENSITIVITY, "#0078BF", "#FF48B0", "#F6F2E8")
     r_reset_btn.click(fn=lambda: riso_defaults, outputs=riso_params)
 
+    haring_params = [h_iterations, h_density, h_contrast]
+    haring_defaults = (_haring_defaults.DEFAULT_ITERATIONS, _haring_defaults.DEFAULT_DENSITY,
+                        _haring_defaults.DEFAULT_CONTRAST)
+    h_reset_btn.click(fn=lambda: haring_defaults, outputs=haring_params)
+
     return {
-        "groups": (dither_group, stipple_group, riso_group),
+        "groups": (dither_group, stipple_group, riso_group, haring_group),
         "dither_params": dither_params,
         "stipple_params": stipple_params,
         "riso_params": riso_params,
+        "haring_params": haring_params,
     }
 
 
@@ -1344,30 +1428,40 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                         info="Postfactum estimation, adds 5-10s, may look off for some inputs",
                     )
                     filter_style = gr.Dropdown(
-                        choices=["None", "Dither", "Stipple", "Riso"],
+                        choices=["None", "Dither", "Stipple", "Riso", "Haring"],
                         value="None",
                         label="Filter",
                         info="Stylized post-process on the finished texture (1-bit AO-driven dither)",
                     )
 
                 _filter_panels = _build_filter_panels()
-                dither_params, stipple_params, riso_params = (
-                    _filter_panels["dither_params"], _filter_panels["stipple_params"], _filter_panels["riso_params"]
+                dither_params, stipple_params, riso_params, haring_params = (
+                    _filter_panels["dither_params"], _filter_panels["stipple_params"],
+                    _filter_panels["riso_params"], _filter_panels["haring_params"],
                 )
                 filter_style.change(
                     fn=lambda f: (gr.update(visible=f == "Dither"), gr.update(visible=f == "Stipple"),
-                                  gr.update(visible=f == "Riso")),
+                                  gr.update(visible=f == "Riso"), gr.update(visible=f == "Haring")),
                     inputs=filter_style,
                     outputs=list(_filter_panels["groups"]),
-                    queue=False,
+                    concurrency_limit=1,
+                    concurrency_id="filter_toggle_1",
+                )
+                filter_style.change(
+                    fn=_filter_paint_tex_update,
+                    inputs=[filter_style, paint_tex],
+                    outputs=paint_tex,
+                    concurrency_limit=1,
+                    concurrency_id="filter_toggle_1",
                 )
 
             with gr.Column(scale=1):
                 current_mesh = gr.State()
                 output_3d = gr.Model3D(label="Result", height=600, elem_id="output-viewer-1")
+                gen_status = gr.Markdown(elem_id="gen-status-1")
                 output_file = gr.File(label="Download .glb")
                 output_obj = gr.File(label="Download .obj (zipped)")
-                _build_png_export_panel(current_mesh)
+                _png_panel = _build_png_export_panel(current_mesh)
 
         _preset_outputs = [
             shape_steps, shape_octree_resolution, use_delight, simplify_before,
@@ -1375,10 +1469,10 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             use_swift_paint, paint_res, paint_steps, paint_guidance, paint_tex,
             paint_superres, paint_sd_strength, paint_sd_res,
         ]
-        btn_lowpoly.click(fn=lambda: _set_preset("lowpoly"), outputs=_preset_outputs)
-        btn_draft.click(fn=lambda: _set_preset("draft"), outputs=_preset_outputs)
-        btn_normal.click(fn=lambda: _set_preset("normal"), outputs=_preset_outputs)
-        btn_high.click(fn=lambda: _set_preset("high"), outputs=_preset_outputs)
+        btn_lowpoly.click(fn=lambda f: _set_preset("lowpoly", f), inputs=filter_style, outputs=_preset_outputs)
+        btn_draft.click(fn=lambda f: _set_preset("draft", f), inputs=filter_style, outputs=_preset_outputs)
+        btn_normal.click(fn=lambda f: _set_preset("normal", f), inputs=filter_style, outputs=_preset_outputs)
+        btn_high.click(fn=lambda f: _set_preset("high", f), inputs=filter_style, outputs=_preset_outputs)
 
         generate_btn.click(
             fn=generate,
@@ -1402,10 +1496,12 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_sd_res,
                 enable_pbr,
                 filter_style,
-                *dither_params, *stipple_params, *riso_params,
+                *dither_params, *stipple_params, *riso_params, *haring_params,
             ],
-            outputs=[output_3d, output_file, output_obj, current_mesh],
-        ).then(fn=_get_memory_stats, outputs=memory_label)
+            outputs=[output_3d, output_file, output_obj, current_mesh, gen_status],
+        ).then(fn=_get_memory_stats, outputs=memory_label).then(
+            fn=_preview_view, inputs=[current_mesh, _png_panel["elev"], _png_panel["azim"]], outputs=_png_panel["preview"],
+        )
 
         def _retexture_current(
             glb_path, use_delight,
@@ -1436,6 +1532,9 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             riso_color_shadow="#0078BF",
             riso_color_detail="#FF48B0",
             riso_paper_color="#F6F2E8",
+            haring_iterations=_haring_defaults.DEFAULT_ITERATIONS,
+            haring_density=_haring_defaults.DEFAULT_DENSITY,
+            haring_contrast=_haring_defaults.DEFAULT_CONTRAST,
             progress=gr.Progress(),
         ):
             global _last_original_inputs
@@ -1456,6 +1555,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 riso_ao_strength, riso_ao_gradient, riso_fine_detail,
                 riso_crease_sensitivity, riso_edge_sensitivity,
                 riso_color_shadow, riso_color_detail, riso_paper_color,
+                haring_iterations, haring_density, haring_contrast,
                 progress=progress,
             )
 
@@ -1469,10 +1569,12 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_superres, paint_sd_strength, paint_sd_res,
                 enable_pbr,
                 filter_style,
-                *dither_params, *stipple_params, *riso_params,
+                *dither_params, *stipple_params, *riso_params, *haring_params,
             ],
-            outputs=[output_3d, output_file, output_obj, current_mesh],
-        ).then(fn=_get_memory_stats, outputs=memory_label)
+            outputs=[output_3d, output_file, output_obj, current_mesh, gen_status],
+        ).then(fn=_get_memory_stats, outputs=memory_label).then(
+            fn=_preview_view, inputs=[current_mesh, _png_panel["elev"], _png_panel["azim"]], outputs=_png_panel["preview"],
+        )
 
     with gr.Tab("[ TEXT TO 3D ]"):
         with gr.Row():
@@ -1582,30 +1684,40 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                         info="Postfactum estimation, adds 5-10s, may look off for some inputs",
                     )
                     filter_style_t2 = gr.Dropdown(
-                        choices=["None", "Dither", "Stipple", "Riso"],
+                        choices=["None", "Dither", "Stipple", "Riso", "Haring"],
                         value="None",
                         label="Filter",
                         info="Stylized post-process on the finished texture (1-bit AO-driven dither)",
                     )
 
                 _filter_panels_t2 = _build_filter_panels()
-                dither_params_t2, stipple_params_t2, riso_params_t2 = (
-                    _filter_panels_t2["dither_params"], _filter_panels_t2["stipple_params"], _filter_panels_t2["riso_params"]
+                dither_params_t2, stipple_params_t2, riso_params_t2, haring_params_t2 = (
+                    _filter_panels_t2["dither_params"], _filter_panels_t2["stipple_params"],
+                    _filter_panels_t2["riso_params"], _filter_panels_t2["haring_params"],
                 )
                 filter_style_t2.change(
                     fn=lambda f: (gr.update(visible=f == "Dither"), gr.update(visible=f == "Stipple"),
-                                  gr.update(visible=f == "Riso")),
+                                  gr.update(visible=f == "Riso"), gr.update(visible=f == "Haring")),
                     inputs=filter_style_t2,
                     outputs=list(_filter_panels_t2["groups"]),
-                    queue=False,
+                    concurrency_limit=1,
+                    concurrency_id="filter_toggle_2",
+                )
+                filter_style_t2.change(
+                    fn=_filter_paint_tex_update,
+                    inputs=[filter_style_t2, paint_tex_t2],
+                    outputs=paint_tex_t2,
+                    concurrency_limit=1,
+                    concurrency_id="filter_toggle_2",
                 )
 
             with gr.Column(scale=1):
                 current_mesh_t2 = gr.State()
                 output_3d_t2 = gr.Model3D(label="Result", height=600, elem_id="output-viewer-2")
+                gen_status_t2 = gr.Markdown(elem_id="gen-status-2")
                 output_file_t2 = gr.File(label="Download .glb")
                 output_obj_t2 = gr.File(label="Download .obj (zipped)")
-                _build_png_export_panel(current_mesh_t2)
+                _png_panel_t2 = _build_png_export_panel(current_mesh_t2)
 
         gen_image_btn.click(
             fn=generate_image,
@@ -1644,6 +1756,9 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             riso_color_shadow="#0078BF",
             riso_color_detail="#FF48B0",
             riso_paper_color="#F6F2E8",
+            haring_iterations=_haring_defaults.DEFAULT_ITERATIONS,
+            haring_density=_haring_defaults.DEFAULT_DENSITY,
+            haring_contrast=_haring_defaults.DEFAULT_CONTRAST,
             shape_backend=SHAPE_BACKEND_DEFAULT,
             progress=gr.Progress()
         ):
@@ -1651,7 +1766,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 raise gr.Error("Generate an image first!")
             img_path = OUTPUT_DIR / "_input.png"
             sd_output_img.save(img_path, "PNG")
-            glb_path, glb_file, obj_zip, mesh_state = generate(
+            glb_path, glb_file, obj_zip, mesh_state, status = generate(
                 str(img_path),
                 use_delight, seed, shape_steps, shape_octree_resolution,
                 simplify_before_texturing, target_faces, skip_texturing,
@@ -1669,9 +1784,10 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 riso_fine_detail=riso_fine_detail, riso_crease_sensitivity=riso_crease_sensitivity,
                 riso_edge_sensitivity=riso_edge_sensitivity, riso_color_shadow=riso_color_shadow,
                 riso_color_detail=riso_color_detail, riso_paper_color=riso_paper_color,
+                haring_iterations=haring_iterations, haring_density=haring_density, haring_contrast=haring_contrast,
                 shape_backend=shape_backend, progress=progress,
             )
-            return glb_path, glb_file, obj_zip, mesh_state
+            return glb_path, glb_file, obj_zip, mesh_state, status
 
         gen_3d_btn.click(
             fn=generate_from_prompt_image,
@@ -1695,10 +1811,12 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_sd_res_t2,
                 enable_pbr_t2,
                 filter_style_t2,
-                *dither_params_t2, *stipple_params_t2, *riso_params_t2,
+                *dither_params_t2, *stipple_params_t2, *riso_params_t2, *haring_params_t2,
             ],
-            outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
-        ).then(fn=_get_memory_stats, outputs=memory_label)
+            outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2, gen_status_t2],
+        ).then(fn=_get_memory_stats, outputs=memory_label).then(
+            fn=_preview_view, inputs=[current_mesh_t2, _png_panel_t2["elev"], _png_panel_t2["azim"]], outputs=_png_panel_t2["preview"],
+        )
 
         def _retexture_current_t2(
             glb_path, use_delight,
@@ -1729,6 +1847,9 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             riso_color_shadow="#0078BF",
             riso_color_detail="#FF48B0",
             riso_paper_color="#F6F2E8",
+            haring_iterations=_haring_defaults.DEFAULT_ITERATIONS,
+            haring_density=_haring_defaults.DEFAULT_DENSITY,
+            haring_contrast=_haring_defaults.DEFAULT_CONTRAST,
             progress=gr.Progress(),
         ):
             global _last_original_inputs
@@ -1749,6 +1870,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 riso_ao_strength, riso_ao_gradient, riso_fine_detail,
                 riso_crease_sensitivity, riso_edge_sensitivity,
                 riso_color_shadow, riso_color_detail, riso_paper_color,
+                haring_iterations, haring_density, haring_contrast,
                 progress=progress,
             )
 
@@ -1762,10 +1884,12 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 paint_superres_t2, paint_sd_strength_t2, paint_sd_res_t2,
                 enable_pbr_t2,
                 filter_style_t2,
-                *dither_params_t2, *stipple_params_t2, *riso_params_t2,
+                *dither_params_t2, *stipple_params_t2, *riso_params_t2, *haring_params_t2,
             ],
-            outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2],
-        ).then(fn=_get_memory_stats, outputs=memory_label)
+            outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2, gen_status_t2],
+        ).then(fn=_get_memory_stats, outputs=memory_label).then(
+            fn=_preview_view, inputs=[current_mesh_t2, _png_panel_t2["elev"], _png_panel_t2["azim"]], outputs=_png_panel_t2["preview"],
+        )
 
         _preset_outputs_t2 = [
             shape_steps_t2, shape_octree_resolution_t2, use_delight_t2, simplify_before_t2,
@@ -1773,10 +1897,10 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
             use_swift_paint_t2, paint_res_t2, paint_steps_t2, paint_guidance_t2, paint_tex_t2,
             paint_superres_t2, paint_sd_strength_t2, paint_sd_res_t2,
         ]
-        btn_lowpoly_t2.click(fn=lambda: _set_preset("lowpoly"), outputs=_preset_outputs_t2)
-        btn_draft_t2.click(fn=lambda: _set_preset("draft"), outputs=_preset_outputs_t2)
-        btn_normal_t2.click(fn=lambda: _set_preset("normal"), outputs=_preset_outputs_t2)
-        btn_high_t2.click(fn=lambda: _set_preset("high"), outputs=_preset_outputs_t2)
+        btn_lowpoly_t2.click(fn=lambda f: _set_preset("lowpoly", f), inputs=filter_style_t2, outputs=_preset_outputs_t2)
+        btn_draft_t2.click(fn=lambda f: _set_preset("draft", f), inputs=filter_style_t2, outputs=_preset_outputs_t2)
+        btn_normal_t2.click(fn=lambda f: _set_preset("normal", f), inputs=filter_style_t2, outputs=_preset_outputs_t2)
+        btn_high_t2.click(fn=lambda f: _set_preset("high", f), inputs=filter_style_t2, outputs=_preset_outputs_t2)
 
     demo.queue()
 

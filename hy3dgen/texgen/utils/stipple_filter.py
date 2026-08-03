@@ -12,11 +12,22 @@
 # fine-tuning enabling code and other elements of the foregoing made publicly available
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
-# Ink stipple filter: same AO + crease + thresholded-albedo-detail "darkness" signal as
+# Ink stipple filter: same AO + crease + albedo-detail "darkness" signal as
 # dither_filter.py (see that module's docstring for what each component contributes and
 # why), rendered as weighted dart-thrown dots instead of Atkinson error-diffusion. Reads
 # softer and more "hand-drawn ink" than the Atkinson dither; darker regions get denser,
 # slightly larger dots (tighter minimum spacing), bright/open regions stay sparse.
+#
+# The albedo-detail component is a plain fixed 50% luminance threshold on the mesh's own
+# painted atlas (dark source pixel -> ink, light source pixel -> paper) -- two more
+# elaborate approaches were tried first and rejected (see conversation/commit history):
+# a percentile high-pass (always flagged exactly the same fraction of pixels as "detail"
+# regardless of the image, flooding highly patterned albedos like fur/stripes with noise
+# unrelated to real shading) and re-projecting the original 2D input photo onto the UV
+# atlas for extra crispness (real feature, not just a tuning knob, and only covers
+# whichever single angle was actually photographed). The plain threshold on the existing
+# atlas was simplest and traced real painted pattern (stripes, markings) correctly once
+# a polarity bug in an early version (dark pixels mapped to white ink) was fixed.
 #
 # This is a simple grid-accelerated dart-throwing (rejection sampling) stippler, not full
 # weighted Voronoi relaxation -- dot placement is a bit more randomly clustered than the
@@ -43,8 +54,6 @@ _AO_MULTIPLIER = 4.0
 _CREASE_ANGLE_DEG = 15.0
 _CREASE_STRENGTH = 1.0
 _ALBEDO_DETAIL_STRENGTH = 0.75
-_ALBEDO_HP_SIGMA = 2.5
-_ALBEDO_THRESHOLD_PERCENTILE = 75.0
 # 1024, not 512: same blockiness bug as dither_filter.py (see its _DITHER_RES comment) --
 # a coarser darkness-map resolution makes the albedo-detail layer's genuine fine paint
 # texture look chunky once resampled up to the dart-throwing canvas.
@@ -92,9 +101,10 @@ def _build_darkness_map(mesh: trimesh.Trimesh, render, albedo: Image.Image,
 
     small_albedo = albedo.convert("L").resize((_WORK_RES, _WORK_RES), Image.LANCZOS)
     gray = np.asarray(small_albedo, dtype=np.float32) / 255.0
-    hp = np.abs(gray - gaussian_filter(gray, sigma=_ALBEDO_HP_SIGMA))
-    cutoff = np.percentile(hp, _ALBEDO_THRESHOLD_PERCENTILE)
-    detail_mask = (hp > cutoff).astype(np.float32)
+    # Dark source pixel -> ink (1), light source pixel -> paper (0); NOT `1 - (gray < 0.5)`
+    # or similar -- getting this polarity backwards was tried once and produced a visible
+    # negative (dots on the lit fur, blank over dark stripes/markings).
+    detail_mask = (gray < 0.5).astype(np.float32)
 
     return np.clip(combined_small + edge_strength * detail_mask, 0, 1)
 

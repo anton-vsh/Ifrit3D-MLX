@@ -70,9 +70,23 @@ _WHITE_CAP = 0.85
 _CREASE_ANGLE_DEG = 15.0
 _CREASE_STRENGTH = 1.0
 _ALBEDO_DETAIL_STRENGTH = 0.75
-_ALBEDO_CANNY_BLUR = 1.0
-_ALBEDO_CANNY_LOW = 40
+# 1.0 (the original value) barely suppressed fine paint/skin-texture noise before
+# Canny ran, so on any albedo with real micro-texture (fur, hair, skin pores) that
+# noise had comparable gradient magnitude to genuine structural edges (eyes, nose,
+# jaw line) and often out-competed them -- real contours got lost in noise rather than
+# traced cleanly. 4.0 was picked by direct visual sweep against a real generated mesh
+# (see conversation/commit history): strong enough to let real structure dominate, not
+# so strong it erases small real features (e.g. eyes) entirely.
+_ALBEDO_CANNY_BLUR = 4.0
+# 40 (the original value), read at 4.0 blur, was actually a bit too permissive again
+# (slightly more detail than the cleanest result in that same sweep) -- 35 is the
+# picked balance between "detail visible" and "not noisy."
+_ALBEDO_CANNY_LOW = 35
 _ALBEDO_CANNY_HIGH = 120
+# Canny's raw output is a 1px-wide line, which reads as too faint once resized up to
+# the final texture resolution. Dilated with a small 2x2 kernel for a touch more
+# weight -- a 3x3 kernel was tried first and looked too heavy/bold at this scale.
+_ALBEDO_LINE_DILATE = 2
 # 1024, not 512: the final NEAREST upscale to texture_size (2048) tiles each
 # dither-resolution pixel into a flat block -- invisible where the darkness signal is
 # smooth (AO/crease), but wherever the albedo-detail layer has genuine fine paint
@@ -154,6 +168,7 @@ def _albedo_edge_mask(albedo: Image.Image, size: int, canny_low: float) -> np.nd
     gray_u8 = np.asarray(small, dtype=np.uint8)
     blurred = cv2.GaussianBlur(gray_u8, (0, 0), _ALBEDO_CANNY_BLUR)
     edges = cv2.Canny(blurred, canny_low, canny_low * 3)
+    edges = cv2.dilate(edges, np.ones((_ALBEDO_LINE_DILATE, _ALBEDO_LINE_DILATE), np.uint8), iterations=1)
     return (edges > 0).astype(np.float32)
 
 
