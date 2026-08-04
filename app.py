@@ -196,7 +196,10 @@ def _preview_view(glb_path, elev, azim):
 def _save_view_png(glb_path, elev, azim, resolution, progress=gr.Progress()):
     progress(0.3, desc="Rendering...")
     img = _render_view_png(glb_path, elev, azim, int(resolution))
-    out_path = OUTPUT_DIR / f"view_{int(elev)}_{int(azim)}_{int(resolution)}.png"
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-png")
+    out_dir = OUTPUT_DIR / ts
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"view_{int(elev)}_{int(azim)}_{int(resolution)}.png"
     img.save(out_path, "PNG")
     progress(1.0, desc="Done!")
     return str(out_path)
@@ -728,35 +731,55 @@ def _set_preset(name, filter_style_value="None"):
 
 
 
-def _build_png_export_panel(current_mesh_state):
+def _build_png_export_panel(current_mesh_state, elem_id_suffix="1"):
     """Builds the collapsible "Save PNG" accordion: azimuth/elevation/resolution
     controls, a live low-res preview (updates on slider release, not every drag tick,
     so dragging doesn't hammer the renderer), a single-view PNG export, and a
     one-click "Save Turnaround Set" that renders the same 6 canonical views used
     everywhere else in this app. Call once per tab (components must be distinct per
     tab); `current_mesh_state` is that tab's current_mesh gr.State (holds the
-    generated .glb path). Returns {"preview", "azim", "elev"} so the caller can chain
-    a `.then(fn=_preview_view, ...)` onto its generate/retexture click handlers, to
-    refresh the preview automatically once a new mesh lands rather than waiting for
-    the user to touch a slider first."""
+    generated .glb path). `elem_id_suffix` must be distinct per call (see the two call
+    sites) -- it's used to give each tab's hidden download-trigger buttons a unique
+    elem_id, since Gradio needs one to be addressable by the JS below. Returns
+    {"preview", "azim", "elev"} so the caller can chain a `.then(fn=_preview_view, ...)`
+    onto its generate/retexture click handlers, to refresh the preview automatically
+    once a new mesh lands rather than waiting for the user to touch a slider first."""
     with gr.Accordion("Save PNG", open=False):
-        azim = gr.Slider(0, 360, value=0, step=5, label="Azimuth")
+        azim = gr.Slider(0, 360, value=180, step=5, label="Azimuth")
         elev = gr.Slider(-90, 90, value=0, step=5, label="Elevation")
         resolution = gr.Radio(["1024", "2048", "4096"], value="2048", label="Resolution")
         preview = gr.Image(label="Preview", height=200, interactive=False)
-        save_btn = gr.DownloadButton("Save PNG", size="sm")
-        turnaround_btn = gr.DownloadButton("Save Turnaround Set (6 views, zipped)", size="sm")
+        save_btn = gr.Button("Save PNG", size="sm")
+        turnaround_btn = gr.Button("Save Turnaround Set (6 views, zipped)", size="sm")
+        # Hidden (not removed -- `visible=False` unmounts the component entirely, so a
+        # JS selector could never find it; "hidden" keeps it in the DOM, just
+        # invisible) DownloadButtons that the visible Buttons above drive indirectly.
+        # A DownloadButton used directly as its own click output triggers the actual
+        # browser download using whatever `value` is bound *at click time* -- on a
+        # fresh page load (or right after a new model finishes) that's still the old/
+        # empty value, since the new one hasn't arrived from the server yet. The
+        # click's own download silently uses that stale value while the fn call that
+        # was supposed to produce the real file runs in the background; the *next*
+        # click then downloads what the *previous* click actually computed, one
+        # generation behind ("first click does nothing, second click works"). Routing
+        # through a separate hidden button and deferring the actual click to a
+        # `.then()` step -- which only runs after the value has genuinely landed --
+        # closes that gap: every click downloads exactly what that click computed,
+        # including the first one (verified directly against Gradio's DownloadButton
+        # click handling in an isolated repro; see conversation/commit history).
+        save_dl = gr.DownloadButton(visible="hidden", elem_id=f"png-save-dl-{elem_id_suffix}")
+        turnaround_dl = gr.DownloadButton(visible="hidden", elem_id=f"png-turnaround-dl-{elem_id_suffix}")
 
         azim.release(fn=_preview_view, inputs=[current_mesh_state, elev, azim], outputs=preview)
         elev.release(fn=_preview_view, inputs=[current_mesh_state, elev, azim], outputs=preview)
 
         save_btn.click(
-            fn=_save_view_png, inputs=[current_mesh_state, elev, azim, resolution], outputs=save_btn,
-        )
+            fn=_save_view_png, inputs=[current_mesh_state, elev, azim, resolution], outputs=save_dl,
+        ).then(fn=None, js=f"() => document.querySelector('#png-save-dl-{elem_id_suffix}').click()")
 
         turnaround_btn.click(
-            fn=_save_turnaround_zip, inputs=[current_mesh_state, resolution], outputs=turnaround_btn,
-        )
+            fn=_save_turnaround_zip, inputs=[current_mesh_state, resolution], outputs=turnaround_dl,
+        ).then(fn=None, js=f"() => document.querySelector('#png-turnaround-dl-{elem_id_suffix}').click()")
 
         return {"preview": preview, "azim": azim, "elev": elev}
 
@@ -1461,7 +1484,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 gen_status = gr.Markdown(elem_id="gen-status-1")
                 output_file = gr.File(label="Download .glb")
                 output_obj = gr.File(label="Download .obj (zipped)")
-                _png_panel = _build_png_export_panel(current_mesh)
+                _png_panel = _build_png_export_panel(current_mesh, elem_id_suffix="1")
 
         _preset_outputs = [
             shape_steps, shape_octree_resolution, use_delight, simplify_before,
@@ -1717,7 +1740,7 @@ with gr.Blocks(title="Ifrit3D MLX") as demo:
                 gen_status_t2 = gr.Markdown(elem_id="gen-status-2")
                 output_file_t2 = gr.File(label="Download .glb")
                 output_obj_t2 = gr.File(label="Download .obj (zipped)")
-                _png_panel_t2 = _build_png_export_panel(current_mesh_t2)
+                _png_panel_t2 = _build_png_export_panel(current_mesh_t2, elem_id_suffix="2")
 
         gen_image_btn.click(
             fn=generate_image,
