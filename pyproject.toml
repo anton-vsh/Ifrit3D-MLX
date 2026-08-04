@@ -1,6 +1,6 @@
 [project]
 name = "m3dium"
-version = "0.3.5"
+version = "0.5.7"
 description = "Run Hunyuan3D on Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
