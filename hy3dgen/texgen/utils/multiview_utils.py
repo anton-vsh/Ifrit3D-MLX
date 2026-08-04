@@ -217,7 +217,7 @@ class Multiview_Diffusion_Net():
                 **step_kwargs,
             ).images
 
-            # Current Ifrit3D-MLX texture baker expects a list of albedo multiview images.
+            # Current m3dium texture baker expects a list of albedo multiview images.
             return mvd_image[:num_view]
 
         camera_info_gen = [camera_info]

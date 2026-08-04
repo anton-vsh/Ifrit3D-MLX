@@ -36,14 +36,14 @@ def _find_app_py() -> Path:
 
 
 def _log_path() -> Path:
-    log_dir = Path.home() / "Library" / "Application Support" / "Ifrit3D-MLX" / "logs"
+    log_dir = Path.home() / "Library" / "Application Support" / "m3dium" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir / "app.log"
 
 
-class Ifrit3DMenuBarApp(rumps.App):
+class M3diumMenuBarApp(rumps.App):
     def __init__(self):
-        super().__init__("[I3D]", quit_button=None)
+        super().__init__("[M3D]", quit_button=None)
         self.menu = ["Open UI", "Quit"]
         self.app_py = _find_app_py()
         self.port = None
@@ -101,4 +101,4 @@ class Ifrit3DMenuBarApp(rumps.App):
 
 
 if __name__ == "__main__":
-    Ifrit3DMenuBarApp().run()
+    M3diumMenuBarApp().run()

@@ -19,9 +19,9 @@ SIGN_IDENTITY="$1"
 NOTARY_PROFILE="$2"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BUNDLE="$REPO_ROOT/dist/Ifrit3D-MLX.app"
+APP_BUNDLE="$REPO_ROOT/dist/m3dium.app"
 ENTITLEMENTS="$REPO_ROOT/scripts/entitlements.plist"
-ZIP_PATH="$REPO_ROOT/dist/Ifrit3D-MLX.zip"
+ZIP_PATH="$REPO_ROOT/dist/m3dium.zip"
 
 if [ ! -d "$APP_BUNDLE" ]; then
   echo "ERROR: $APP_BUNDLE not found — run scripts/build_app.sh first" >&2

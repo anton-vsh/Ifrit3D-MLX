@@ -1,4 +1,4 @@
-# Ifrit3D-MLX (mac Os only)
+# m3dium (mac Os only)
 
 Spiritual successor to Luma Genie (RIP). Now you can generate those «ugly» (but incredibly cozy) 3D models once again (texture-detail passes included), with shape generation running on a native Swift/MLX backend by default — roughly 4x faster than the PyTorch fallback. As a cherry on the cake, you can also generate robust lowpoly models and «normal» high poly aswell.
 
@@ -28,7 +28,7 @@ See the [full release notes](../../releases/tag/v0.3.5) for details, and [v0.3.0
 
 ---
 
-## What's new in Ifrit3D-MLX
+## What's new in m3dium
 
 Based on [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX) (CLI-only) and has grown into a full application on top of it:
 
@@ -49,9 +49,9 @@ Based on [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-ML
 ## Setup / install
 
 1. Use «Releases» section to download .dmg and install as a regular .app
-2. Open the .dmg, drag Ifrit3D-MLX.app into Applications.
+2. Open the .dmg, drag m3dium.app into Applications.
 3. First launch only: right-click (or Control-click) the app → Open → Open in the confirmation dialog. This build is ad-hoc signed, not notarized (no Apple Developer Program), so Gatekeeper shows one "unidentified developer" warning on first launch. After that one approval, double-click works normally from then on.
-4. On first use, model weights download automatically (takes time) into ~/Library/Application Support/Ifrit3D-MLX/ — no manual setup needed.
+4. On first use, model weights download automatically (takes time) into ~/Library/Application Support/m3dium/ — no manual setup needed.
 
 
 ## Credits

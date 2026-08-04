@@ -4,8 +4,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BUNDLE="$REPO_ROOT/dist/Ifrit3D-MLX.app"
-DMG_PATH="$REPO_ROOT/dist/Ifrit3D-MLX.dmg"
+APP_BUNDLE="$REPO_ROOT/dist/m3dium.app"
+DMG_PATH="$REPO_ROOT/dist/m3dium.dmg"
 STAGING_DIR="$REPO_ROOT/dist/.dmg_staging"
 
 if [ ! -d "$APP_BUNDLE" ]; then
@@ -20,7 +20,7 @@ cp -R "$APP_BUNDLE" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
 
 echo "==> Building $DMG_PATH"
-hdiutil create -volname "Ifrit3D-MLX" \
+hdiutil create -volname "m3dium" \
   -srcfolder "$STAGING_DIR" \
   -ov -format UDZO \
   "$DMG_PATH"

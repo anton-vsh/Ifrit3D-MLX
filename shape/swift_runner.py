@@ -14,7 +14,7 @@ SWIFT_BIN = ROOT / "swift" / "bin" / "hy3d"
 # which is read-only once code-signed — writing weights there fails and
 # would silently discard the signature even if it didn't. HY3DGEN_MODELS is
 # the app's existing writable-directory convention (set by the launcher to
-# ~/Library/Application Support/Ifrit3D-MLX/models, sibling to hf_home/logs;
+# ~/Library/Application Support/m3dium/models, sibling to hf_home/logs;
 # app.py falls back to ROOT/models/hy3dgen in dev). Mirror that fallback so
 # swift's weights land in the *same* writable location either way, one
 # level up (sibling of "hy3dgen"/"models", matching the launcher's own

@@ -1349,11 +1349,11 @@ input:disabled {
 }
 """
 
-with gr.Blocks(title="Ifrit3D MLX") as demo:
+with gr.Blocks(title="m3dium") as demo:
     with gr.Row(elem_id="status-bar"):
         memory_label = gr.Markdown(_get_memory_stats(), elem_id="memory-bar")
         shutdown_btn = gr.Button("Shutdown Server", size="sm", variant="secondary", elem_id="shutdown-btn")
-    gr.Markdown("Ifrit3D-MLX — Anton Shlyonkin ([shlyonk.in](https://www.shlyonk.in))", elem_id="credit-line")
+    gr.Markdown("m3dium — Anton Shlyonkin ([shlyonk.in](https://www.shlyonk.in))", elem_id="credit-line")
     shutdown_btn.click(fn=_shutdown_server, outputs=memory_label)
 
     with gr.Tab("[ IMAGE TO 3D ]"):

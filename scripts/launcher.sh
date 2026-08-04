@@ -1,5 +1,5 @@
 #!/bin/bash
-# Ifrit3D-MLX.app's CFBundleExecutable. Resolves paths relative to its own
+# m3dium.app's CFBundleExecutable. Resolves paths relative to its own
 # location so it works regardless of where the .app is installed, sets up a
 # writable app-support location for model weights/HF cache (the bundle
 # itself is read-only once installed to /Applications), and hands off to the
@@ -10,7 +10,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTENTS_DIR="$(dirname "$DIR")"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
-APP_SUPPORT="$HOME/Library/Application Support/Ifrit3D-MLX"
+APP_SUPPORT="$HOME/Library/Application Support/m3dium"
 mkdir -p "$APP_SUPPORT/models" "$APP_SUPPORT/hf_home" "$APP_SUPPORT/logs"
 
 # Redirect this launcher's own output so a failure before menubar_helper.py's

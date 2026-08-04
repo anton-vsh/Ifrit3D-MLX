@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assembles Ifrit3D-MLX.app from the current source tree + a fully-resolved
+# Assembles m3dium.app from the current source tree + a fully-resolved
 # Python environment. Run from anywhere; always operates on the repo this
 # script lives in.
 #
@@ -13,7 +13,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-APP_NAME="Ifrit3D-MLX"
+APP_NAME="m3dium"
 PY_VERSION="3.14"
 BUILD_DIR="$REPO_ROOT/dist"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
@@ -85,4 +85,4 @@ fi
 BUNDLE_SIZE="$(du -sh "$APP_BUNDLE" | cut -f1)"
 echo "==> Done: $APP_BUNDLE ($BUNDLE_SIZE, unsigned)"
 echo "    Test with: open \"$APP_BUNDLE\""
-echo "    Logs at:   ~/Library/Application Support/Ifrit3D-MLX/logs/"
+echo "    Logs at:   ~/Library/Application Support/m3dium/logs/"

@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Ifrit3D-MLX</string>
+    <string>m3dium</string>
     <key>CFBundleDisplayName</key>
-    <string>Ifrit3D MLX</string>
+    <string>m3dium</string>
     <key>CFBundleIdentifier</key>
-    <string>in.shlyonk.ifrit3d-mlx</string>
+    <string>in.shlyonk.m3dium</string>
     <key>CFBundleVersion</key>
     <string>__VERSION__</string>
     <key>CFBundleShortVersionString</key>
@@ -15,7 +15,7 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
-    <string>Ifrit3D-MLX</string>
+    <string>m3dium</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon.icns</string>
     <key>LSMinimumSystemVersion</key>

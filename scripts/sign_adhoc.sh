@@ -4,7 +4,7 @@
 #
 # Apple Silicon's kernel refuses to execute a Mach-O binary with *no*
 # signature at all, so an entirely unsigned .app downloaded from the
-# internet shows Gatekeeper's scariest error: "Ifrit3D-MLX is damaged
+# internet shows Gatekeeper's scariest error: "m3dium is damaged
 # and can't be opened. You should move it to the Trash." Ad-hoc signing
 # (identity "-", no certificate) satisfies that kernel-level requirement
 # without needing a Developer ID. Recipients still see one normal
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BUNDLE="$REPO_ROOT/dist/Ifrit3D-MLX.app"
+APP_BUNDLE="$REPO_ROOT/dist/m3dium.app"
 ENTITLEMENTS="$REPO_ROOT/scripts/entitlements.plist"
 
 if [ ! -d "$APP_BUNDLE" ]; then
@@ -41,7 +41,7 @@ echo ""
 echo "This is NOT notarized — 'spctl -a -vv' will report it as rejected by"
 echo "Gatekeeper's source policy, which is expected without a Developer ID."
 echo "Recipients need to bypass Gatekeeper's warning ONCE on first launch:"
-echo "  1. Right-click (or Control-click) Ifrit3D-MLX.app -> Open"
+echo "  1. Right-click (or Control-click) m3dium.app -> Open"
 echo "  2. Click \"Open\" in the dialog that appears"
 echo "After that first approval, macOS remembers it and launches normally"
 echo "(including double-click) from then on."

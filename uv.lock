@@ -564,7 +564,7 @@ wheels = [
 ]
 
 [[package]]
-name = "ifrit3d-mlx"
+name = "m3dium"
 version = "0.3.5"
 source = { virtual = "." }
 dependencies = [
