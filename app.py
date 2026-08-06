@@ -24,6 +24,10 @@ from hy3dgen.texgen.utils import dither_filter as _dither_defaults
 from hy3dgen.texgen.utils import stipple_filter as _stipple_defaults
 from hy3dgen.texgen.utils import riso_filter as _riso_defaults
 from hy3dgen.texgen.utils import haring_filter as _haring_defaults
+from hy3dgen.texgen.utils import mosh_filter as _mosh_defaults
+from hy3dgen.texgen.utils import halftone_filter as _halftone_defaults
+from hy3dgen.texgen.utils import checkerboard_filter as _checkerboard_defaults
+from hy3dgen.texgen.utils import fresnel_filter as _fresnel_defaults
 
 starlette.status.HTTP_422_UNPROCESSABLE_ENTITY = starlette.status.HTTP_422_UNPROCESSABLE_CONTENT
 
@@ -178,7 +182,18 @@ def _render_view_png(glb_path, elev, azim, resolution):
 
     loaded = _trimesh.load(glb_path, process=False)
     mesh = loaded.to_geometry() if isinstance(loaded, _trimesh.Scene) else loaded
-    albedo = mesh.visual.material.baseColorTexture.convert("RGB")
+    material = mesh.visual.material
+    if material.baseColorTexture is not None:
+        albedo = material.baseColorTexture.convert("RGB")
+    else:
+        # Flat-color material with no baked texture (e.g. the Fresnel filter, which
+        # deliberately never bakes one -- see fresnel_filter.py). Synthesize a solid
+        # swatch from baseColorFactor so this offline renderer's tex-sampling path still
+        # has an image to sample; this won't show Fresnel's real-time metallic/IBL
+        # response (that only exists in the live Model3D viewer), just its flat color.
+        factor = getattr(material, "baseColorFactor", None)
+        rgb = tuple(int(max(0.0, min(1.0, c)) * 255) for c in (factor[:3] if factor is not None else (1.0, 1.0, 1.0)))
+        albedo = _Image.new("RGB", (64, 64), rgb)
 
     render = MeshRender(texture_size=albedo.size[0])
     render.load_mesh(mesh)
@@ -286,6 +301,20 @@ def _run_retexture(
     haring_iterations=_haring_defaults.DEFAULT_ITERATIONS,
     haring_density=_haring_defaults.DEFAULT_DENSITY,
     haring_contrast=_haring_defaults.DEFAULT_CONTRAST,
+    mosh_intensity=_mosh_defaults.DEFAULT_INTENSITY,
+    mosh_displacement=_mosh_defaults.DEFAULT_DISPLACEMENT,
+    halftone_ao_strength=_halftone_defaults.DEFAULT_AO_STRENGTH,
+    halftone_crease_sensitivity=_halftone_defaults.DEFAULT_CREASE_SENSITIVITY,
+    halftone_dot_size=_halftone_defaults.DEFAULT_DOT_SIZE,
+    halftone_color_boost=_halftone_defaults.DEFAULT_COLOR_BOOST,
+    checkerboard_cells_u=_checkerboard_defaults.DEFAULT_CELLS_U,
+    checkerboard_cells_v=_checkerboard_defaults.DEFAULT_CELLS_V,
+    checkerboard_ao_strength=_checkerboard_defaults.DEFAULT_AO_STRENGTH,
+    checkerboard_color_a="#1A1A1A",
+    checkerboard_color_b="#F2F2F2",
+    fresnel_color=_fresnel_defaults.DEFAULT_COLOR,
+    fresnel_metallic=_fresnel_defaults.DEFAULT_METALLIC,
+    fresnel_roughness=_fresnel_defaults.DEFAULT_ROUGHNESS,
     progress=gr.Progress(),
 ):
     if not glb_path:
@@ -338,7 +367,7 @@ def _run_retexture(
     # The dither filter replaces the material entirely with a flat black/white texture,
     # so PBR maps (metallic/roughness/AO/normal) would be computed only to be discarded
     # immediately after -- skip that work whenever a filter is going to overwrite it.
-    if enable_pbr and filter_style == "None":
+    if enable_pbr and filter_style not in _MATERIAL_REPLACING_FILTERS:
         progress(0.91, desc="Generating PBR maps (metallic/roughness/AO/normal)...")
         start = time.time()
         from hy3dgen.texgen.utils.postfactum_pbr import apply_postfactum_pbr
@@ -385,6 +414,40 @@ def _run_retexture(
             textured, iterations=haring_iterations, density=haring_density, contrast=haring_contrast,
         )
         print(f"[app] haring filter done in {time.time() - start:.1f}s")
+    elif filter_style == "3D Mosh":
+        progress(0.92, desc="Applying 3D mosh filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.mosh_filter import apply_mosh_filter
+        textured = apply_mosh_filter(
+            textured, intensity=mosh_intensity, displacement=mosh_displacement, seed=resolved_seed,
+        )
+        print(f"[app] mosh filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Halftone":
+        progress(0.92, desc="Applying halftone filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.halftone_filter import apply_halftone_filter
+        textured = apply_halftone_filter(
+            textured, ao_strength=halftone_ao_strength, crease_sensitivity=halftone_crease_sensitivity,
+            dot_size=halftone_dot_size, color_boost=halftone_color_boost,
+        )
+        print(f"[app] halftone filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Checkerboard":
+        progress(0.92, desc="Applying checkerboard filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.checkerboard_filter import apply_checkerboard_filter
+        textured = apply_checkerboard_filter(
+            textured, cells_u=checkerboard_cells_u, cells_v=checkerboard_cells_v,
+            ao_strength=checkerboard_ao_strength, color_a=checkerboard_color_a, color_b=checkerboard_color_b,
+        )
+        print(f"[app] checkerboard filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Fresnel":
+        progress(0.92, desc="Applying fresnel material...")
+        start = time.time()
+        from hy3dgen.texgen.utils.fresnel_filter import apply_fresnel_filter
+        textured = apply_fresnel_filter(
+            textured, color=fresnel_color, metallic=fresnel_metallic, roughness=fresnel_roughness,
+        )
+        print(f"[app] fresnel filter done in {time.time() - start:.1f}s")
 
     glb_out = run_dir / "result.glb"
     textured.export(glb_out)
@@ -440,6 +503,20 @@ def generate(
     haring_iterations=_haring_defaults.DEFAULT_ITERATIONS,
     haring_density=_haring_defaults.DEFAULT_DENSITY,
     haring_contrast=_haring_defaults.DEFAULT_CONTRAST,
+    mosh_intensity=_mosh_defaults.DEFAULT_INTENSITY,
+    mosh_displacement=_mosh_defaults.DEFAULT_DISPLACEMENT,
+    halftone_ao_strength=_halftone_defaults.DEFAULT_AO_STRENGTH,
+    halftone_crease_sensitivity=_halftone_defaults.DEFAULT_CREASE_SENSITIVITY,
+    halftone_dot_size=_halftone_defaults.DEFAULT_DOT_SIZE,
+    halftone_color_boost=_halftone_defaults.DEFAULT_COLOR_BOOST,
+    checkerboard_cells_u=_checkerboard_defaults.DEFAULT_CELLS_U,
+    checkerboard_cells_v=_checkerboard_defaults.DEFAULT_CELLS_V,
+    checkerboard_ao_strength=_checkerboard_defaults.DEFAULT_AO_STRENGTH,
+    checkerboard_color_a="#1A1A1A",
+    checkerboard_color_b="#F2F2F2",
+    fresnel_color=_fresnel_defaults.DEFAULT_COLOR,
+    fresnel_metallic=_fresnel_defaults.DEFAULT_METALLIC,
+    fresnel_roughness=_fresnel_defaults.DEFAULT_ROUGHNESS,
     shape_backend=SHAPE_BACKEND_DEFAULT,
     run_dir=None,
     progress=gr.Progress(),
@@ -535,7 +612,7 @@ def generate(
     # The dither filter replaces the material entirely with a flat black/white texture,
     # so PBR maps (metallic/roughness/AO/normal) would be computed only to be discarded
     # immediately after -- skip that work whenever a filter is going to overwrite it.
-    if enable_pbr and filter_style == "None":
+    if enable_pbr and filter_style not in _MATERIAL_REPLACING_FILTERS:
         progress(0.89, desc="Generating PBR maps (metallic/roughness/AO/normal)...")
         start = time.time()
         from hy3dgen.texgen.utils.postfactum_pbr import apply_postfactum_pbr
@@ -581,6 +658,40 @@ def generate(
             textured, iterations=haring_iterations, density=haring_density, contrast=haring_contrast,
         )
         print(f"[app] haring filter done in {time.time() - start:.1f}s")
+    elif filter_style == "3D Mosh":
+        progress(0.895, desc="Applying 3D mosh filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.mosh_filter import apply_mosh_filter
+        textured = apply_mosh_filter(
+            textured, intensity=mosh_intensity, displacement=mosh_displacement, seed=seed,
+        )
+        print(f"[app] mosh filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Halftone":
+        progress(0.895, desc="Applying halftone filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.halftone_filter import apply_halftone_filter
+        textured = apply_halftone_filter(
+            textured, ao_strength=halftone_ao_strength, crease_sensitivity=halftone_crease_sensitivity,
+            dot_size=halftone_dot_size, color_boost=halftone_color_boost,
+        )
+        print(f"[app] halftone filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Checkerboard":
+        progress(0.895, desc="Applying checkerboard filter...")
+        start = time.time()
+        from hy3dgen.texgen.utils.checkerboard_filter import apply_checkerboard_filter
+        textured = apply_checkerboard_filter(
+            textured, cells_u=checkerboard_cells_u, cells_v=checkerboard_cells_v,
+            ao_strength=checkerboard_ao_strength, color_a=checkerboard_color_a, color_b=checkerboard_color_b,
+        )
+        print(f"[app] checkerboard filter done in {time.time() - start:.1f}s")
+    elif filter_style == "Fresnel":
+        progress(0.895, desc="Applying fresnel material...")
+        start = time.time()
+        from hy3dgen.texgen.utils.fresnel_filter import apply_fresnel_filter
+        textured = apply_fresnel_filter(
+            textured, color=fresnel_color, metallic=fresnel_metallic, roughness=fresnel_roughness,
+        )
+        print(f"[app] fresnel filter done in {time.time() - start:.1f}s")
 
     glb_path = run_dir / "result.glb"
     textured.export(glb_path)
@@ -725,7 +836,7 @@ def _set_preset(name, filter_style_value="None"):
     # (the Lowpoly preset's default 256) starves it regardless of which preset button
     # was pressed. Match the floor _filter_paint_tex_update already enforces when the
     # Filter dropdown itself changes.
-    if filter_style_value != "None":
+    if filter_style_value in _TEXTURE_FILTERS:
         vals[11] = max(vals[11], _PAINT_TEX_MIN_WITH_FILTER)
     return tuple(vals)
 
@@ -786,6 +897,14 @@ def _build_png_export_panel(current_mesh_state, elem_id_suffix="1"):
 
 _PAINT_TEX_MIN_NO_FILTER = 256
 _PAINT_TEX_MIN_WITH_FILTER = 1024
+# 3D Mosh (geometry-only), Checkerboard, and Fresnel (both procedural/material-only)
+# never read the painted atlas -- excluded from the texture-res floor the filters that
+# actually derive their pattern from painted albedo color/detail need.
+_TEXTURE_FILTERS = {"Dither", "Stipple", "Riso", "Haring", "Halftone"}
+# All filters that fully replace mesh.visual.material -- PBR map generation would be
+# wasted work for any of these (see the two `enable_pbr and filter_style not in ...`
+# call sites), not just the original four.
+_MATERIAL_REPLACING_FILTERS = {"Dither", "Stipple", "Riso", "Haring", "Halftone", "Checkerboard", "Fresnel"}
 
 
 def _filter_paint_tex_update(filter_style_value, current_tex):
@@ -796,39 +915,71 @@ def _filter_paint_tex_update(filter_style_value, current_tex):
     produces washed-out/blocky results no amount of filter tuning can fix. Bumps the
     current value up to the new floor if it's below it; restores the full 256 floor
     (without forcing the value back down) once no filter is selected."""
-    if filter_style_value == "None":
+    if filter_style_value not in _TEXTURE_FILTERS:
         return gr.update(minimum=_PAINT_TEX_MIN_NO_FILTER)
     return gr.update(minimum=_PAINT_TEX_MIN_WITH_FILTER, value=max(current_tex, _PAINT_TEX_MIN_WITH_FILTER))
 
 
-def _build_filter_panels():
-    """Builds the four per-filter settings panels (Dither/Stipple/Riso/Haring), each in its
-    own gr.Group with a Reset button, visibility toggled by the Filter dropdown. Call
-    once per tab (Gradio components must be distinct per tab).
+# Slugs must match the elem_id each panel is built with in `_build_filter_panels()`
+# (elem_id=f"filter-panel-{slug}-{elem_id_suffix}").
+_FILTER_SLUGS = {
+    "Dither": "dither", "Stipple": "stipple", "Riso": "riso", "Haring": "haring",
+    "3D Mosh": "3d-mosh", "Halftone": "halftone", "Checkerboard": "checkerboard", "Fresnel": "fresnel",
+}
 
-    Each panel is a plain, class-less gr.Column wrapping the actual bordered
-    gr.Group -- toggling visibility on the outer Column instead of directly on the
-    "quiet-box thin-box" Group. A thin-box Group renders as two nested divs that both
-    carry the border class (see the .thin-box CSS comment above); toggling visibility
-    directly on it left an empty bordered box on screen when "hidden" (only one of the
-    two divs actually collapsed). The outer Column has no border class of its own, so
-    hiding it leaves nothing behind.
 
-    A pure client-side JS toggle (no Python round-trip) was tried here and reverted:
-    Gradio 6.19.0 only binds a component's `elem_id` onto its DOM node once that
-    component has actually been visible via a real server-side `visible=True` update at
-    least once -- a component that starts `visible=False` and is only ever toggled by
-    client-side JS never gets an addressable element to toggle in the first place.
+def _filter_visibility_js(elem_id_suffix: str) -> str:
+    """Client-side-only panel switch for one tab's Filter dropdown -- no server round
+    trip at all, so there's no network gap for a fast second switch to land inside of
+    (see `_build_filter_panels()`'s docstring for the two server-round-trip bugs this
+    replaces). Scoped to `elem_id_suffix` so tab 1's dropdown never touches tab 2's
+    panels: only clears `.filter-panel-active` off panels whose id ends in this tab's
+    suffix, then adds it to the one matching the newly selected filter, if any (e.g.
+    "None" matches no panel, so everything in this tab stays hidden)."""
+    slug_map_js = ", ".join(f'"{name}": "{slug}"' for name, slug in _FILTER_SLUGS.items())
+    return f"""(f) => {{
+        const slugMap = {{{slug_map_js}}};
+        document.querySelectorAll('.filter-panel-group[id$="-{elem_id_suffix}"]').forEach(
+            el => el.classList.remove('filter-panel-active')
+        );
+        const slug = slugMap[f];
+        if (slug) {{
+            const el = document.getElementById('filter-panel-' + slug + '-{elem_id_suffix}');
+            if (el) el.classList.add('filter-panel-active');
+        }}
+    }}"""
 
-    The call site's dropdown `.change()` also had a `queue=False` "fix" at one point,
-    which was backwards: bypassing the queue let two rapid selections run as concurrent
-    unordered HTTP calls, so the *older* selection's response could land after the
-    newer one and leave a stale panel visible. Queuing (the default) with an explicit
-    `concurrency_limit=1` on its own `concurrency_id` serializes same-listener calls and
-    relies on `.change()`'s default `trigger_mode="always_last"` to coalesce rapid
-    switches -- that's what actually eliminates the race, without sharing a queue slot
-    with unrelated long-running jobs like `generate()`."""
-    with gr.Column(visible=False) as dither_group:
+
+def _build_filter_panels(elem_id_suffix="1"):
+    """Builds the eight per-filter settings panels, each in its own gr.Group with a
+    Reset button, visibility toggled by the Filter dropdown. Call once per tab (Gradio
+    components must be distinct per tab); `elem_id_suffix` must be distinct per call
+    (see the two call sites) since each panel's `elem_id` must be unique page-wide.
+
+    Each panel is a plain gr.Column wrapping the actual bordered "quiet-box thin-box"
+    Group, tagged with elem_classes=["filter-panel-group"] and a unique elem_id. All
+    eight stay mounted (`visible=True`, Gradio's default) from page load -- switching
+    which one is shown is done entirely client-side (see the dropdown's `.change(js=...)`
+    at the call sites below), never a server round trip:
+
+    A Python-side toggle (server round trip flipping `visible=True`/`False` on the
+    Column) was tried first and gave two different bugs, in order:
+    1. A component that starts `visible=False` and is only revealed later needs one
+       real server-side `visible=True` update to get its `elem_id` bound to a DOM node
+       at all -- Gradio 6.19.0 does not pre-bind hidden components. Revealing a
+       never-before-shown panel in the *same* update batch as hiding an already-visible
+       sibling (e.g. switching straight from "Checkerboard" to "Fresnel" the first time
+       a session ever selects Fresnel) dropped the reveal half entirely.
+    2. Splitting "show new panel" and "hide old panels" into two sequential `.then()`
+       steps (to avoid #1) reintroduced a *worse* race: each step is a real server
+       round trip, so a second rapid dropdown change could land in the gap between
+       them, and the first switch's now-late "hide the old ones" step would hide the
+       *second* switch's just-shown panel.
+    Both only exist because the toggle goes through the server at all. Keeping every
+    panel permanently mounted and switching visibility with plain client-side CSS/JS
+    sidesteps both: there's no "never mounted" component (nothing starts hidden) and no
+    network round trip for a fast second switch to land inside of."""
+    with gr.Column(elem_id=f"filter-panel-dither-{elem_id_suffix}", elem_classes=["filter-panel-group"]) as dither_group:
         with gr.Group(elem_classes=["quiet-box", "thin-box"]):
             gr.Markdown("**Dither settings**")
             d_ao_strength = gr.Slider(0.5, 10.0, value=_dither_defaults.DEFAULT_AO_STRENGTH, step=0.1, label="AO Strength")
@@ -841,7 +992,7 @@ def _build_filter_panels():
                                             label="Edge Sensitivity", info="Lower catches more edges")
             d_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
 
-    with gr.Column(visible=False) as stipple_group:
+    with gr.Column(elem_id=f"filter-panel-stipple-{elem_id_suffix}", elem_classes=["filter-panel-group"]) as stipple_group:
         with gr.Group(elem_classes=["quiet-box", "thin-box"]):
             gr.Markdown("**Stipple settings**")
             s_ao_strength = gr.Slider(0.5, 10.0, value=_stipple_defaults.DEFAULT_AO_STRENGTH, step=0.1, label="AO Strength")
@@ -853,7 +1004,7 @@ def _build_filter_panels():
             s_dot_size = gr.Slider(0.25, 3.0, value=_stipple_defaults.DEFAULT_DOT_SIZE, step=0.05, label="Dot Size")
             s_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
 
-    with gr.Column(visible=False) as riso_group:
+    with gr.Column(elem_id=f"filter-panel-riso-{elem_id_suffix}", elem_classes=["filter-panel-group"]) as riso_group:
         with gr.Group(elem_classes=["quiet-box", "thin-box"]):
             gr.Markdown("**Riso settings**")
             r_ao_strength = gr.Slider(0.5, 10.0, value=_riso_defaults.DEFAULT_AO_STRENGTH, step=0.1, label="AO Strength")
@@ -869,7 +1020,7 @@ def _build_filter_panels():
                 r_paper_color = gr.ColorPicker(value="#F6F2E8", label="Paper Color")
             r_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
 
-    with gr.Column(visible=False) as haring_group:
+    with gr.Column(elem_id=f"filter-panel-haring-{elem_id_suffix}", elem_classes=["filter-panel-group"]) as haring_group:
         with gr.Group(elem_classes=["quiet-box", "thin-box"]):
             gr.Markdown("**Haring settings**")
             h_iterations = gr.Slider(1, 80, value=_haring_defaults.DEFAULT_ITERATIONS, step=1, label="Iterations",
@@ -879,6 +1030,46 @@ def _build_filter_panels():
             h_contrast = gr.Slider(0.2, 2.5, value=_haring_defaults.DEFAULT_CONTRAST, step=0.1, label="Contrast",
                                     info="Higher pushes the pattern to pure black/white faster")
             h_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
+
+    with gr.Column(elem_id=f"filter-panel-3d-mosh-{elem_id_suffix}", elem_classes=["filter-panel-group"]) as mosh_group:
+        with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+            gr.Markdown("**3D Mosh settings**")
+            m_intensity = gr.Slider(0.0, 1.0, value=_mosh_defaults.DEFAULT_INTENSITY, step=0.01, label="Intensity",
+                                     info="How many vertex blocks glitch, and how big they are")
+            m_displacement = gr.Slider(0.0, 1.0, value=_mosh_defaults.DEFAULT_DISPLACEMENT, step=0.01, label="Displacement",
+                                        info="How far non-copied vertices drift from their original position")
+            m_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
+
+    with gr.Column(elem_id=f"filter-panel-halftone-{elem_id_suffix}", elem_classes=["filter-panel-group"]) as halftone_group:
+        with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+            gr.Markdown("**Halftone settings**")
+            ht_ao_strength = gr.Slider(0.5, 10.0, value=_halftone_defaults.DEFAULT_AO_STRENGTH, step=0.1, label="AO Strength")
+            ht_crease_sensitivity = gr.Slider(5.0, 45.0, value=_halftone_defaults.DEFAULT_CREASE_SENSITIVITY, step=1.0,
+                                               label="Crease Sensitivity", info="Lower catches more creases")
+            ht_dot_size = gr.Slider(0.3, 3.0, value=_halftone_defaults.DEFAULT_DOT_SIZE, step=0.05, label="Dot Size")
+            ht_color_boost = gr.Slider(0.5, 2.5, value=_halftone_defaults.DEFAULT_COLOR_BOOST, step=0.05, label="Color Boost",
+                                        info="Contrast/saturation push before CMYK separation")
+            ht_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
+
+    with gr.Column(elem_id=f"filter-panel-checkerboard-{elem_id_suffix}", elem_classes=["filter-panel-group"]) as checkerboard_group:
+        with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+            gr.Markdown("**Checkerboard settings**")
+            cb_cells_u = gr.Slider(1, 64, value=_checkerboard_defaults.DEFAULT_CELLS_U, step=1, label="Cells Horizontal")
+            cb_cells_v = gr.Slider(1, 64, value=_checkerboard_defaults.DEFAULT_CELLS_V, step=1, label="Cells Vertical")
+            cb_ao_strength = gr.Slider(0.0, 4.0, value=_checkerboard_defaults.DEFAULT_AO_STRENGTH, step=0.1, label="AO Strength")
+            with gr.Row(elem_classes=["filter-color-row"]):
+                cb_color_a = gr.ColorPicker(value=_checkerboard_defaults.DEFAULT_COLOR_A, label="Color A")
+                cb_color_b = gr.ColorPicker(value=_checkerboard_defaults.DEFAULT_COLOR_B, label="Color B")
+            cb_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
+
+    with gr.Column(elem_id=f"filter-panel-fresnel-{elem_id_suffix}", elem_classes=["filter-panel-group"]) as fresnel_group:
+        with gr.Group(elem_classes=["quiet-box", "thin-box"]):
+            gr.Markdown("**Fresnel settings**")
+            fr_color = gr.ColorPicker(value=_fresnel_defaults.DEFAULT_COLOR, label="Color")
+            fr_metallic = gr.Slider(0.0, 1.0, value=_fresnel_defaults.DEFAULT_METALLIC, step=0.01, label="Metallic")
+            fr_roughness = gr.Slider(0.0, 1.0, value=_fresnel_defaults.DEFAULT_ROUGHNESS, step=0.01, label="Roughness",
+                                      info="Lower = sharper, stronger fresnel response")
+            fr_reset_btn = gr.Button("Reset to Defaults", size="sm", elem_classes=["filter-reset-btn"])
 
     dither_params = [d_ao_strength, d_ao_gradient, d_fine_detail, d_crease_sensitivity, d_edge_strength, d_edge_sensitivity]
     dither_defaults = (_dither_defaults.DEFAULT_AO_STRENGTH, _dither_defaults.DEFAULT_AO_GRADIENT_LENGTH,
@@ -904,12 +1095,37 @@ def _build_filter_panels():
                         _haring_defaults.DEFAULT_CONTRAST)
     h_reset_btn.click(fn=lambda: haring_defaults, outputs=haring_params)
 
+    mosh_params = [m_intensity, m_displacement]
+    mosh_defaults = (_mosh_defaults.DEFAULT_INTENSITY, _mosh_defaults.DEFAULT_DISPLACEMENT)
+    m_reset_btn.click(fn=lambda: mosh_defaults, outputs=mosh_params)
+
+    halftone_params = [ht_ao_strength, ht_crease_sensitivity, ht_dot_size, ht_color_boost]
+    halftone_defaults = (_halftone_defaults.DEFAULT_AO_STRENGTH, _halftone_defaults.DEFAULT_CREASE_SENSITIVITY,
+                          _halftone_defaults.DEFAULT_DOT_SIZE, _halftone_defaults.DEFAULT_COLOR_BOOST)
+    ht_reset_btn.click(fn=lambda: halftone_defaults, outputs=halftone_params)
+
+    checkerboard_params = [cb_cells_u, cb_cells_v, cb_ao_strength, cb_color_a, cb_color_b]
+    checkerboard_defaults = (_checkerboard_defaults.DEFAULT_CELLS_U, _checkerboard_defaults.DEFAULT_CELLS_V,
+                              _checkerboard_defaults.DEFAULT_AO_STRENGTH, _checkerboard_defaults.DEFAULT_COLOR_A,
+                              _checkerboard_defaults.DEFAULT_COLOR_B)
+    cb_reset_btn.click(fn=lambda: checkerboard_defaults, outputs=checkerboard_params)
+
+    fresnel_params = [fr_color, fr_metallic, fr_roughness]
+    fresnel_defaults = (_fresnel_defaults.DEFAULT_COLOR, _fresnel_defaults.DEFAULT_METALLIC,
+                         _fresnel_defaults.DEFAULT_ROUGHNESS)
+    fr_reset_btn.click(fn=lambda: fresnel_defaults, outputs=fresnel_params)
+
     return {
-        "groups": (dither_group, stipple_group, riso_group, haring_group),
+        "groups": (dither_group, stipple_group, riso_group, haring_group, mosh_group,
+                   halftone_group, checkerboard_group, fresnel_group),
         "dither_params": dither_params,
         "stipple_params": stipple_params,
         "riso_params": riso_params,
         "haring_params": haring_params,
+        "mosh_params": mosh_params,
+        "halftone_params": halftone_params,
+        "checkerboard_params": checkerboard_params,
+        "fresnel_params": fresnel_params,
     }
 
 
@@ -1270,6 +1486,18 @@ button {
 .filter-color-row {
     margin-top: 1rem !important;
 }
+/* Fresnel's Color swatch: the thick black frame isn't our CSS -- it's the browser's
+   own default <input type="color"> chrome (the swatch itself is a
+   ::-webkit-color-swatch pseudo-element with its own border, untouched by `border:
+   none` on the input). Scoped to Fresnel's panels only, since that's the one flagged. */
+#filter-panel-fresnel-1 input[type="color"]::-webkit-color-swatch,
+#filter-panel-fresnel-2 input[type="color"]::-webkit-color-swatch {
+    border: none !important;
+}
+#filter-panel-fresnel-1 input[type="color"]::-moz-color-swatch,
+#filter-panel-fresnel-2 input[type="color"]::-moz-color-swatch {
+    border: none !important;
+}
 /* Generate/Re-texture button pair: the parent Column's default 28px flex gap (see
    quiet-box's own comment above) reads as too much space between two buttons that
    are directly related actions -- a third of that (~9px) keeps them visually paired
@@ -1292,6 +1520,17 @@ button {
 .thin-box .row .form > .block {
     border-bottom: none !important;
     border-right: none !important;
+}
+
+/* Filter settings panels: all eight stay mounted from page load (see
+   _build_filter_panels()'s docstring for why); the Filter dropdown's `.change(js=...)`
+   toggles which single one is shown by adding/removing this class, entirely
+   client-side. */
+.filter-panel-group {
+    display: none !important;
+}
+.filter-panel-group.filter-panel-active {
+    display: block !important;
 }
 
 .label-wrap, .accordion .label-wrap span {
@@ -1451,31 +1690,25 @@ with gr.Blocks(title="m3dium") as demo:
                         info="Postfactum estimation, adds 5-10s, may look off for some inputs",
                     )
                     filter_style = gr.Dropdown(
-                        choices=["None", "Dither", "Stipple", "Riso", "Haring"],
+                        choices=["None", "Dither", "Stipple", "Riso", "Haring", "3D Mosh", "Halftone", "Checkerboard", "Fresnel"],
                         value="None",
                         label="Filter",
-                        info="Stylized post-process on the finished texture (1-bit AO-driven dither)",
+                        info="Stylized post-process: texture styles, 3D Mosh (vertex glitch), or Fresnel (real-time material)",
                     )
 
-                _filter_panels = _build_filter_panels()
-                dither_params, stipple_params, riso_params, haring_params = (
+                _filter_panels = _build_filter_panels(elem_id_suffix="1")
+                (dither_params, stipple_params, riso_params, haring_params, mosh_params,
+                 halftone_params, checkerboard_params, fresnel_params) = (
                     _filter_panels["dither_params"], _filter_panels["stipple_params"],
                     _filter_panels["riso_params"], _filter_panels["haring_params"],
+                    _filter_panels["mosh_params"], _filter_panels["halftone_params"],
+                    _filter_panels["checkerboard_params"], _filter_panels["fresnel_params"],
                 )
-                filter_style.change(
-                    fn=lambda f: (gr.update(visible=f == "Dither"), gr.update(visible=f == "Stipple"),
-                                  gr.update(visible=f == "Riso"), gr.update(visible=f == "Haring")),
-                    inputs=filter_style,
-                    outputs=list(_filter_panels["groups"]),
-                    concurrency_limit=1,
-                    concurrency_id="filter_toggle_1",
-                )
+                filter_style.change(fn=None, inputs=filter_style, js=_filter_visibility_js("1"))
                 filter_style.change(
                     fn=_filter_paint_tex_update,
                     inputs=[filter_style, paint_tex],
                     outputs=paint_tex,
-                    concurrency_limit=1,
-                    concurrency_id="filter_toggle_1",
                 )
 
             with gr.Column(scale=1):
@@ -1519,7 +1752,8 @@ with gr.Blocks(title="m3dium") as demo:
                 paint_sd_res,
                 enable_pbr,
                 filter_style,
-                *dither_params, *stipple_params, *riso_params, *haring_params,
+                *dither_params, *stipple_params, *riso_params, *haring_params, *mosh_params,
+                *halftone_params, *checkerboard_params, *fresnel_params,
             ],
             outputs=[output_3d, output_file, output_obj, current_mesh, gen_status],
         ).then(fn=_get_memory_stats, outputs=memory_label).then(
@@ -1558,6 +1792,20 @@ with gr.Blocks(title="m3dium") as demo:
             haring_iterations=_haring_defaults.DEFAULT_ITERATIONS,
             haring_density=_haring_defaults.DEFAULT_DENSITY,
             haring_contrast=_haring_defaults.DEFAULT_CONTRAST,
+            mosh_intensity=_mosh_defaults.DEFAULT_INTENSITY,
+            mosh_displacement=_mosh_defaults.DEFAULT_DISPLACEMENT,
+            halftone_ao_strength=_halftone_defaults.DEFAULT_AO_STRENGTH,
+            halftone_crease_sensitivity=_halftone_defaults.DEFAULT_CREASE_SENSITIVITY,
+            halftone_dot_size=_halftone_defaults.DEFAULT_DOT_SIZE,
+            halftone_color_boost=_halftone_defaults.DEFAULT_COLOR_BOOST,
+            checkerboard_cells_u=_checkerboard_defaults.DEFAULT_CELLS_U,
+            checkerboard_cells_v=_checkerboard_defaults.DEFAULT_CELLS_V,
+            checkerboard_ao_strength=_checkerboard_defaults.DEFAULT_AO_STRENGTH,
+            checkerboard_color_a="#1A1A1A",
+            checkerboard_color_b="#F2F2F2",
+            fresnel_color=_fresnel_defaults.DEFAULT_COLOR,
+            fresnel_metallic=_fresnel_defaults.DEFAULT_METALLIC,
+            fresnel_roughness=_fresnel_defaults.DEFAULT_ROUGHNESS,
             progress=gr.Progress(),
         ):
             global _last_original_inputs
@@ -1579,6 +1827,11 @@ with gr.Blocks(title="m3dium") as demo:
                 riso_crease_sensitivity, riso_edge_sensitivity,
                 riso_color_shadow, riso_color_detail, riso_paper_color,
                 haring_iterations, haring_density, haring_contrast,
+                mosh_intensity, mosh_displacement,
+                halftone_ao_strength, halftone_crease_sensitivity, halftone_dot_size, halftone_color_boost,
+                checkerboard_cells_u, checkerboard_cells_v, checkerboard_ao_strength,
+                checkerboard_color_a, checkerboard_color_b,
+                fresnel_color, fresnel_metallic, fresnel_roughness,
                 progress=progress,
             )
 
@@ -1592,7 +1845,8 @@ with gr.Blocks(title="m3dium") as demo:
                 paint_superres, paint_sd_strength, paint_sd_res,
                 enable_pbr,
                 filter_style,
-                *dither_params, *stipple_params, *riso_params, *haring_params,
+                *dither_params, *stipple_params, *riso_params, *haring_params, *mosh_params,
+                *halftone_params, *checkerboard_params, *fresnel_params,
             ],
             outputs=[output_3d, output_file, output_obj, current_mesh, gen_status],
         ).then(fn=_get_memory_stats, outputs=memory_label).then(
@@ -1707,31 +1961,25 @@ with gr.Blocks(title="m3dium") as demo:
                         info="Postfactum estimation, adds 5-10s, may look off for some inputs",
                     )
                     filter_style_t2 = gr.Dropdown(
-                        choices=["None", "Dither", "Stipple", "Riso", "Haring"],
+                        choices=["None", "Dither", "Stipple", "Riso", "Haring", "3D Mosh", "Halftone", "Checkerboard", "Fresnel"],
                         value="None",
                         label="Filter",
-                        info="Stylized post-process on the finished texture (1-bit AO-driven dither)",
+                        info="Stylized post-process: texture styles, 3D Mosh (vertex glitch), or Fresnel (real-time material)",
                     )
 
-                _filter_panels_t2 = _build_filter_panels()
-                dither_params_t2, stipple_params_t2, riso_params_t2, haring_params_t2 = (
+                _filter_panels_t2 = _build_filter_panels(elem_id_suffix="2")
+                (dither_params_t2, stipple_params_t2, riso_params_t2, haring_params_t2, mosh_params_t2,
+                 halftone_params_t2, checkerboard_params_t2, fresnel_params_t2) = (
                     _filter_panels_t2["dither_params"], _filter_panels_t2["stipple_params"],
                     _filter_panels_t2["riso_params"], _filter_panels_t2["haring_params"],
+                    _filter_panels_t2["mosh_params"], _filter_panels_t2["halftone_params"],
+                    _filter_panels_t2["checkerboard_params"], _filter_panels_t2["fresnel_params"],
                 )
-                filter_style_t2.change(
-                    fn=lambda f: (gr.update(visible=f == "Dither"), gr.update(visible=f == "Stipple"),
-                                  gr.update(visible=f == "Riso"), gr.update(visible=f == "Haring")),
-                    inputs=filter_style_t2,
-                    outputs=list(_filter_panels_t2["groups"]),
-                    concurrency_limit=1,
-                    concurrency_id="filter_toggle_2",
-                )
+                filter_style_t2.change(fn=None, inputs=filter_style_t2, js=_filter_visibility_js("2"))
                 filter_style_t2.change(
                     fn=_filter_paint_tex_update,
                     inputs=[filter_style_t2, paint_tex_t2],
                     outputs=paint_tex_t2,
-                    concurrency_limit=1,
-                    concurrency_id="filter_toggle_2",
                 )
 
             with gr.Column(scale=1):
@@ -1782,6 +2030,20 @@ with gr.Blocks(title="m3dium") as demo:
             haring_iterations=_haring_defaults.DEFAULT_ITERATIONS,
             haring_density=_haring_defaults.DEFAULT_DENSITY,
             haring_contrast=_haring_defaults.DEFAULT_CONTRAST,
+            mosh_intensity=_mosh_defaults.DEFAULT_INTENSITY,
+            mosh_displacement=_mosh_defaults.DEFAULT_DISPLACEMENT,
+            halftone_ao_strength=_halftone_defaults.DEFAULT_AO_STRENGTH,
+            halftone_crease_sensitivity=_halftone_defaults.DEFAULT_CREASE_SENSITIVITY,
+            halftone_dot_size=_halftone_defaults.DEFAULT_DOT_SIZE,
+            halftone_color_boost=_halftone_defaults.DEFAULT_COLOR_BOOST,
+            checkerboard_cells_u=_checkerboard_defaults.DEFAULT_CELLS_U,
+            checkerboard_cells_v=_checkerboard_defaults.DEFAULT_CELLS_V,
+            checkerboard_ao_strength=_checkerboard_defaults.DEFAULT_AO_STRENGTH,
+            checkerboard_color_a="#1A1A1A",
+            checkerboard_color_b="#F2F2F2",
+            fresnel_color=_fresnel_defaults.DEFAULT_COLOR,
+            fresnel_metallic=_fresnel_defaults.DEFAULT_METALLIC,
+            fresnel_roughness=_fresnel_defaults.DEFAULT_ROUGHNESS,
             shape_backend=SHAPE_BACKEND_DEFAULT,
             progress=gr.Progress()
         ):
@@ -1808,6 +2070,13 @@ with gr.Blocks(title="m3dium") as demo:
                 riso_edge_sensitivity=riso_edge_sensitivity, riso_color_shadow=riso_color_shadow,
                 riso_color_detail=riso_color_detail, riso_paper_color=riso_paper_color,
                 haring_iterations=haring_iterations, haring_density=haring_density, haring_contrast=haring_contrast,
+                mosh_intensity=mosh_intensity, mosh_displacement=mosh_displacement,
+                halftone_ao_strength=halftone_ao_strength, halftone_crease_sensitivity=halftone_crease_sensitivity,
+                halftone_dot_size=halftone_dot_size, halftone_color_boost=halftone_color_boost,
+                checkerboard_cells_u=checkerboard_cells_u, checkerboard_cells_v=checkerboard_cells_v,
+                checkerboard_ao_strength=checkerboard_ao_strength,
+                checkerboard_color_a=checkerboard_color_a, checkerboard_color_b=checkerboard_color_b,
+                fresnel_color=fresnel_color, fresnel_metallic=fresnel_metallic, fresnel_roughness=fresnel_roughness,
                 shape_backend=shape_backend, progress=progress,
             )
             return glb_path, glb_file, obj_zip, mesh_state, status
@@ -1834,7 +2103,8 @@ with gr.Blocks(title="m3dium") as demo:
                 paint_sd_res_t2,
                 enable_pbr_t2,
                 filter_style_t2,
-                *dither_params_t2, *stipple_params_t2, *riso_params_t2, *haring_params_t2,
+                *dither_params_t2, *stipple_params_t2, *riso_params_t2, *haring_params_t2, *mosh_params_t2,
+                *halftone_params_t2, *checkerboard_params_t2, *fresnel_params_t2,
             ],
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2, gen_status_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label).then(
@@ -1873,6 +2143,20 @@ with gr.Blocks(title="m3dium") as demo:
             haring_iterations=_haring_defaults.DEFAULT_ITERATIONS,
             haring_density=_haring_defaults.DEFAULT_DENSITY,
             haring_contrast=_haring_defaults.DEFAULT_CONTRAST,
+            mosh_intensity=_mosh_defaults.DEFAULT_INTENSITY,
+            mosh_displacement=_mosh_defaults.DEFAULT_DISPLACEMENT,
+            halftone_ao_strength=_halftone_defaults.DEFAULT_AO_STRENGTH,
+            halftone_crease_sensitivity=_halftone_defaults.DEFAULT_CREASE_SENSITIVITY,
+            halftone_dot_size=_halftone_defaults.DEFAULT_DOT_SIZE,
+            halftone_color_boost=_halftone_defaults.DEFAULT_COLOR_BOOST,
+            checkerboard_cells_u=_checkerboard_defaults.DEFAULT_CELLS_U,
+            checkerboard_cells_v=_checkerboard_defaults.DEFAULT_CELLS_V,
+            checkerboard_ao_strength=_checkerboard_defaults.DEFAULT_AO_STRENGTH,
+            checkerboard_color_a="#1A1A1A",
+            checkerboard_color_b="#F2F2F2",
+            fresnel_color=_fresnel_defaults.DEFAULT_COLOR,
+            fresnel_metallic=_fresnel_defaults.DEFAULT_METALLIC,
+            fresnel_roughness=_fresnel_defaults.DEFAULT_ROUGHNESS,
             progress=gr.Progress(),
         ):
             global _last_original_inputs
@@ -1894,6 +2178,11 @@ with gr.Blocks(title="m3dium") as demo:
                 riso_crease_sensitivity, riso_edge_sensitivity,
                 riso_color_shadow, riso_color_detail, riso_paper_color,
                 haring_iterations, haring_density, haring_contrast,
+                mosh_intensity, mosh_displacement,
+                halftone_ao_strength, halftone_crease_sensitivity, halftone_dot_size, halftone_color_boost,
+                checkerboard_cells_u, checkerboard_cells_v, checkerboard_ao_strength,
+                checkerboard_color_a, checkerboard_color_b,
+                fresnel_color, fresnel_metallic, fresnel_roughness,
                 progress=progress,
             )
 
@@ -1907,7 +2196,8 @@ with gr.Blocks(title="m3dium") as demo:
                 paint_superres_t2, paint_sd_strength_t2, paint_sd_res_t2,
                 enable_pbr_t2,
                 filter_style_t2,
-                *dither_params_t2, *stipple_params_t2, *riso_params_t2, *haring_params_t2,
+                *dither_params_t2, *stipple_params_t2, *riso_params_t2, *haring_params_t2, *mosh_params_t2,
+                *halftone_params_t2, *checkerboard_params_t2, *fresnel_params_t2,
             ],
             outputs=[output_3d_t2, output_file_t2, output_obj_t2, current_mesh_t2, gen_status_t2],
         ).then(fn=_get_memory_stats, outputs=memory_label).then(

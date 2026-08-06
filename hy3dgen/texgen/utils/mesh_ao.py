@@ -16,19 +16,31 @@
 # occlusion, floored/blurred for lighting use) and dither_filter.py (stylized shading
 # signal, its own contrast/blur tuning) -- the raycasting and UV baking is identical,
 # only the post-processing differs per caller.
+#
+# Raycasting itself runs on mtlbvh's Metal-accelerated BVH (already an unconditional
+# project dependency -- see libraries/mtlbvh), NOT trimesh's `mesh.ray`. That matters:
+# this project has no Embree/pyembree binding installed (only bare `rtree`), so
+# `mesh.ray` resolves to trimesh's pure-Python RayMeshIntersector fallback, which does
+# not scale gracefully with ray count -- confirmed directly (see conversation/commit
+# history) that a real generated+simplified mesh with ~25k unique vertices (32 rays/
+# vertex = ~800k total rays) never returned from `mesh.ray.intersects_any` in a
+# reasonable wait, hanging every AO-driven filter (Dither/Stipple/Riso/Halftone/
+# Checkerboard alike, they all call this function). mtlbvh traces the same ~800k rays
+# in well under a tenth of a second.
 
 import numpy as np
 import torch
 import trimesh
+from mtlbvh import MtlBVH
 
 
 def raycast_ao_raw(mesh: trimesh.Trimesh, render, n_rays: int = 32, seed: int = 0) -> np.ndarray:
     """Real geometric AO: dedup by position (UV-seam duplicates share a value for free),
     smooth per-vertex normals (averaged over corner copies -- the raw per-corner normals on
-    this unwelded mesh convention are faceted, not smooth), one batched Embree raycast, baked
-    to UV space via the same interpolation machinery the pipeline already uses for position/
-    normal maps, then filled with the real reference inpaint. Returns HxW float32 in [0, 1],
-    NOT floored or blurred -- callers apply their own post-processing.
+    this unwelded mesh convention are faceted, not smooth), one batched mtlbvh raycast,
+    baked to UV space via the same interpolation machinery the pipeline already uses for
+    position/normal maps, then filled with the real reference inpaint. Returns HxW
+    float32 in [0, 1], NOT floored or blurred -- callers apply their own post-processing.
     `render` is a MeshRender with `mesh` already loaded (shared with the caller)."""
     verts = mesh.vertices
     rounded = verts.round(5)
@@ -66,7 +78,19 @@ def raycast_ao_raw(mesh: trimesh.Trimesh, render, n_rays: int = 32, seed: int = 
     dirs = cosine_hemisphere_batch(uniq_normals, n_rays)
     origins = np.broadcast_to((uniq_verts[:, None, :] + uniq_normals[:, None, :] * eps), dirs.shape).reshape(-1, 3)
     dirs = dirs.reshape(-1, 3)
-    hits = mesh.ray.intersects_any(origins, dirs)
+
+    # mesh.vertices/.faces here are this pipeline's usual unwelded-per-corner convention
+    # (see corner_normals above) -- fine for BVH construction, which only needs
+    # triangle positions, not a watertight/shared-vertex topology.
+    bvh = MtlBVH(
+        torch.from_numpy(np.asarray(mesh.vertices, dtype=np.float32)).to(render.device),
+        torch.from_numpy(np.asarray(mesh.faces, dtype=np.int32)).to(render.device),
+    )
+    origins_t = torch.from_numpy(origins.astype(np.float32)).to(render.device)
+    dirs_t = torch.from_numpy(dirs.astype(np.float32)).to(render.device)
+    _, face_id, _ = bvh.ray_trace(origins_t, dirs_t)
+    hits = (face_id >= 0).cpu().numpy()
+
     ao_uniq = 1.0 - hits.reshape(n_uniq, n_rays).mean(axis=1)
     ao_full = ao_uniq[inverse].astype(np.float32)
 
