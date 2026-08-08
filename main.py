@@ -94,14 +94,14 @@ def maybe_remove_bg(image: Any, use_rembg: bool, remover: Optional[Any]) -> Any:
     return image.convert("RGBA")
 
 
-def load_pil_images(paths: List[Path], use_rembg: bool) -> List[Any]:
+def load_pil_images(paths: List[Path], use_rembg: bool, progress_callback=None) -> List[Any]:
     from PIL import Image
 
     remover = None
     if use_rembg:
         from hy3dgen.rembg import get_background_remover
 
-        remover = get_background_remover()
+        remover = get_background_remover(progress_callback=progress_callback)
 
     out: List[Any] = []
     for p in paths:
@@ -200,7 +200,7 @@ def run_paint_pipeline(mesh, image_paths: List[Path], args, progress_callback=No
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
     model_repo, subfolder = choose_paint_model(args)
-    images = load_pil_images(image_paths, use_rembg=not args.no_rembg)
+    images = load_pil_images(image_paths, use_rembg=not args.no_rembg, progress_callback=progress_callback)
     image_input = images if len(images) > 1 else images[0]
 
     swift_kwargs = None

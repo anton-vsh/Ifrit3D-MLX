@@ -61,11 +61,13 @@ _CLASSIFIER_LOCK = threading.Lock()
 _classifier = None
 
 
-def _get_material_classifier():
+def _get_material_classifier(progress_callback=None):
     global _classifier
     with _CLASSIFIER_LOCK:
         if _classifier is None:
-            _classifier = MaterialClassifier()
+            from hf_progress import report_hf_downloads
+            with report_hf_downloads(progress_callback, "Downloading material classifier (first run only)"):
+                _classifier = MaterialClassifier()
         return _classifier
 
 
@@ -104,7 +106,8 @@ def _bake_normal_from_luminance(albedo_tex: Image.Image, strength: float) -> Ima
 
 
 def apply_postfactum_pbr(mesh: trimesh.Trimesh, reference_image: Image.Image,
-                         bump_base_strength: float = 0.08) -> trimesh.Trimesh:
+                         bump_base_strength: float = 0.08,
+                         progress_callback=None) -> trimesh.Trimesh:
     """Upgrades `mesh`'s existing albedo-only material in place with metallic/roughness
     factors, a baked AO texture, and a baked normal map. `mesh.visual.material` must already
     be a trimesh PBRMaterial with `baseColorTexture` set (i.e. already painted). Returns
@@ -113,7 +116,7 @@ def apply_postfactum_pbr(mesh: trimesh.Trimesh, reference_image: Image.Image,
     albedo_tex = material.baseColorTexture.convert("RGB")
     texture_size = albedo_tex.size[0]
 
-    classifier = _get_material_classifier()
+    classifier = _get_material_classifier(progress_callback=progress_callback)
     metallic_val, roughness_val = classifier.estimate(reference_image)
     # Compress the raw CLIP roughness estimate away from the extremes (e.g. a glazed-porcelain
     # photo shot without a strong visible specular highlight can score as high as ~0.5-0.6 --

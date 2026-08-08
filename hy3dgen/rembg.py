@@ -17,7 +17,17 @@ from rembg import remove, new_session
 
 
 class BackgroundRemover():
-    def __init__(self):
+    def __init__(self, progress_callback=None):
+        # new_session() downloads the ONNX model (~176MB) via rembg's own
+        # pooch-based downloader on first use -- not huggingface_hub, so
+        # hf_progress.report_hf_downloads' tqdm patch can't see it, and
+        # rembg's new_session() takes no progress hook of its own to attach
+        # to. One descriptive message before the (blocking) call is the most
+        # we can surface here -- not a real byte-level bar like the
+        # huggingface_hub-backed downloads elsewhere, but still turns several
+        # seconds-to-minutes of silence into "yes, something is happening."
+        if progress_callback is not None:
+            progress_callback(0.0, "Loading background-removal model (first run only)...")
         self.session = new_session()
 
     def __call__(self, image: Image.Image):
@@ -32,8 +42,8 @@ class BackgroundRemover():
 _shared_remover = None
 
 
-def get_background_remover() -> "BackgroundRemover":
+def get_background_remover(progress_callback=None) -> "BackgroundRemover":
     global _shared_remover
     if _shared_remover is None:
-        _shared_remover = BackgroundRemover()
+        _shared_remover = BackgroundRemover(progress_callback=progress_callback)
     return _shared_remover

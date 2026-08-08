@@ -349,10 +349,12 @@ class Hunyuan3DPaintPipeline:
         self.models['sd_upscale_model'] = None
         self.models['subject_classifier'] = None
 
-    def _get_subject_classifier(self):
+    def _get_subject_classifier(self, progress_callback=None):
         if self.models['subject_classifier'] is None:
             from .utils.subject_classifier import SubjectClassifier
-            self.models['subject_classifier'] = SubjectClassifier(device=self.config.device)
+            from hf_progress import report_hf_downloads
+            with report_hf_downloads(progress_callback, "Downloading subject classifier (first run only)"):
+                self.models['subject_classifier'] = SubjectClassifier(device=self.config.device)
         return self.models['subject_classifier']
 
     def _get_delight_model(self):
@@ -570,7 +572,7 @@ class Hunyuan3DPaintPipeline:
             # comment for why this matters with guidance_scale=0). Low-
             # confidence classifications fall back to the generic prompt
             # (subject=None) rather than force a poor label onto every view.
-            subject = self._get_subject_classifier()(images_prompt[0])
+            subject = self._get_subject_classifier(progress_callback=progress_callback)(images_prompt[0])
             logger.debug(f"SD Turbo detail pass subject: {subject!r}")
             for i in range(len(multiviews)):
                 multiviews[i] = sd_model(multiviews[i], subject=subject, seed=seed)

@@ -107,14 +107,14 @@ def maybe_remove_bg(image: Any, use_rembg: bool, remover: Optional[Any]) -> Any:
     return image.convert("RGBA")
 
 
-def load_pil_images(paths: List[Path], use_rembg: bool) -> List[Any]:
+def load_pil_images(paths: List[Path], use_rembg: bool, progress_callback=None) -> List[Any]:
     from PIL import Image
 
     remover = None
     if use_rembg:
         from hy3dgen.rembg import get_background_remover
 
-        remover = get_background_remover()
+        remover = get_background_remover(progress_callback=progress_callback)
 
     out: List[Any] = []
     for p in paths:
@@ -272,7 +272,7 @@ def run_shape_pipeline(image_paths: List[Path], mode: str, args, forced_preset: 
             # binary the RGBA cutout instead.
             input_path = image_paths[0]
             if not args.no_rembg:
-                cutout = load_pil_images([input_path], use_rembg=True)[0]
+                cutout = load_pil_images([input_path], use_rembg=True, progress_callback=progress_callback)[0]
                 input_path = Path(tmpdir) / "input_rgba.png"
                 cutout.save(input_path)
 
@@ -294,7 +294,7 @@ def run_shape_pipeline(image_paths: List[Path], mode: str, args, forced_preset: 
     if mode == "mv" and subfolder == "hunyuan3d-dit-v2-1":
         raise SystemExit("2.1 does not provide an official multiview shape checkpoint in this repo. Use mv/mv-turbo instead.")
 
-    images = load_pil_images(image_paths, use_rembg=not args.no_rembg)
+    images = load_pil_images(image_paths, use_rembg=not args.no_rembg, progress_callback=progress_callback)
     image_input = images[0] if len(images) == 1 else {"front": images[0], "left": images[1], "back": images[2]}
 
     pipeline = get_or_load_shape_pipeline(

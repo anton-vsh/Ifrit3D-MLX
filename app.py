@@ -372,7 +372,8 @@ def _run_retexture(
         start = time.time()
         from hy3dgen.texgen.utils.postfactum_pbr import apply_postfactum_pbr
         from PIL import Image
-        textured = apply_postfactum_pbr(textured, Image.open(image_paths[0]))
+        textured = apply_postfactum_pbr(textured, Image.open(image_paths[0]),
+                                         progress_callback=_scaled_progress(progress, 0.91, 0.92))
         print(f"[app] postfactum PBR done in {time.time() - start:.1f}s")
 
     if filter_style == "Dither":
@@ -616,7 +617,7 @@ def generate(
         progress(0.89, desc="Generating PBR maps (metallic/roughness/AO/normal)...")
         start = time.time()
         from hy3dgen.texgen.utils.postfactum_pbr import apply_postfactum_pbr
-        textured = apply_postfactum_pbr(textured, img)
+        textured = apply_postfactum_pbr(textured, img, progress_callback=_scaled_progress(progress, 0.89, 0.90))
         print(f"[app] postfactum PBR done in {time.time() - start:.1f}s")
 
     if filter_style == "Dither":
