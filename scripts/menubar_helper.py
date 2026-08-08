@@ -75,6 +75,12 @@ class M3diumMenuBarApp(rumps.App):
                 m = PORT_RE.search(line)
                 if m:
                     self.port = int(m.group(1))
+                    # This is a menu-bar-only app (no Dock icon, no window of its own) --
+                    # without opening the browser tab itself on first launch, a user who
+                    # doesn't notice the tiny menu bar icon sees literally nothing happen
+                    # after double-clicking the app (confirmed directly: reported as
+                    # "nothing happens" even though the server was up and running fine).
+                    webbrowser.open(f"http://127.0.0.1:{self.port}")
 
     def _poll_process(self, _timer):
         if self.proc.poll() is not None:
