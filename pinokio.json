@@ -1,0 +1,12 @@
+{
+  "links": [{
+    "title": "Anton Shlyonkin (wrote the app/launcher)",
+    "links": [{
+      "title": "Website",
+      "value": "https://www.shlyonk.in"
+    }, {
+      "title": "Github",
+      "value": "https://github.com/anton-vsh/m3dium"
+    }]
+  }]
+}

@@ -2,6 +2,13 @@
 # meaningful to publish)
 .claude/
 
+# Pinokio launcher (install.js) working files -- extracted from the published
+# .dmg at install time, or downloaded/generated on first run. Not source.
+/app/
+/cache/
+/m3dium.dmg
+/logs/
+
 # MLX converted weights
 converted/
 __pycache__/

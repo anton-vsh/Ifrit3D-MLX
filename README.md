@@ -53,6 +53,12 @@ Based on [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-ML
 3. First launch only: right-click (or Control-click) the app → Open → Open in the confirmation dialog. This build is ad-hoc signed, not notarized (no Apple Developer Program), so Gatekeeper shows one "unidentified developer" warning on first launch. After that one approval, double-click works normally from then on.
 4. On first use, model weights download automatically (takes time) into ~/Library/Application Support/m3dium/ — no manual setup needed.
 
+### Alternative: Pinokio
+
+If you use [Pinokio](https://pinokio.co), paste this repo's URL (`https://github.com/anton-vsh/m3dium`) into its "Install" field instead. The launcher (`install.js`/`start.js`/`pinokio.js`) downloads the same signed `.dmg` from this repo's Releases and extracts the prebuilt interpreter + Metal extensions — no compilation, no Xcode Command Line Tools needed. Model weights still download on first use, same as above.
+
+Once running, the app exposes a standard Gradio API at `<url>/?view=api` (see the URL in Pinokio's "Open Web UI" tab) with an auto-generated schema — usable from cURL, Python (`gradio_client`), or JavaScript (`@gradio/client`).
+
 
 ## Credits
 
