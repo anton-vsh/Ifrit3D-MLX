@@ -3,17 +3,13 @@
 Fast 3d generation for graphic designers. Includes image to 3d and text to 3d, built in postprocessing and png export — no need for additional 3d software. Apple native architecture.
 
 
-# m3dium (mac Os only)
+# m3dium (Apple Silicon only — formerly Ifrit 3d)
 
-Spiritual successor to Luma Genie (RIP). Now you can generate those «ugly» (but incredibly cozy) 3D models once again (texture-detail passes included), with shape generation running on a native Swift/MLX backend by default — roughly 4x faster than the PyTorch fallback. As a cherry on the cake, you can also generate robust lowpoly models and «normal» high poly aswell.
+Started as a spiritual successor to Luma Genie (RIP) ended up as an ultimate poster asset machine. Not only you can generate those «ugly» (but incredibly cozy) 3D models once again using built-in Stable diffusion turbo (texture-detail passes included), with shape generation running on a native Swift/MLX backend by default — roughly 4x faster than the PyTorch pipeline. As a cherry on top, you can also generate robust lowpoly models and «normal» high poly as well.
 
 <img width="1551" height="892" alt="Снимок экрана — 2026-07-16 в 13 48 36" src="https://github.com/user-attachments/assets/e8829d46-c764-40a5-bbe5-abf3171621a9" />
 
 
-
-Huge thank you to the authors of the original models and MLX port.
-
-Full reference implementation of Hunyuan3D inference on native Apple Silicon, including MLX texturing, plus a full Gradio UI and a standalone macOS app.
 
 Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
@@ -22,20 +18,7 @@ Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 
 ---
 
-## Latest release: [v0.3.5](../../releases/tag/v0.3.5)
-
-- **Fixed warped/missing facial features on the Swift paint backend** (most visible on the Lowpoly preset) — the camera class-embedding index fed to the UNet was a plain per-view batch index instead of the model's actual trained camera-pose identity for each view, telling the model the wrong learned viewpoint on every render.
-- **Fixed inconsistent eyes/fine detail from the SD-Turbo upscale pass** — the per-view detail pass had no fixed seed (non-deterministic run-to-run) and used decorrelated noise per view; it's now seeded from the run's seed, with the same seed shared across all views for consistency in regions multiple views blend together.
-- **Replaced the Swift bake's texture-fill algorithm with the real reference algorithm** — unseen/self-occluded texels (e.g. a tail folding against a body) previously filled via a simplified 2D nearest-neighbor approach that produced jagged, glitchy-looking seams; now uses the actual Tencent reference algorithm (mesh vertex-graph color propagation), plus a small blur pass for residual fine-grained gaps.
-- **Fixed a missing `rtree` dependency** needed by the post-texture mesh-simplification UV-transfer path.
-
-See the [full release notes](../../releases/tag/v0.3.5) for details, and [v0.3.0's notes](../../releases/tag/v0.3.0) for the native Swift/MLX paint backend, CFG/RoPE fix, and redesigned presets.
-
----
-
 ## What's new in m3dium
-
-Based on [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-MLX) (CLI-only) and has grown into a full application on top of it:
 
 - **Zero manual model setup** — shape, paint, delight, SD Turbo, and the CLIP subject classifier all download automatically from Hugging Face on first use and are cached locally — no manual checkpoint placement, no config editing, whether you're running the packaged app or from source.
 - **Standalone macOS app** — the same UI packaged as a double-clickable `.app`/`.dmg` with a menu bar helper (no Terminal window, no Dock icon). See [Releases](../../releases) for a prebuilt build, or `scripts/build_app.sh` to build your own.
@@ -48,6 +31,9 @@ Based on [ZimengXiong/Hunyuan3D-MLX](https://github.com/ZimengXiong/Hunyuan3D-ML
 - **Upscale texture pass** — an optional latent generative touch-up applied per-view before baking.
 - **Lowpoly / Draft / Normal / High presets** — one-click combinations tuning geometry (reduction target, octree resolution) together with paint settings (resolution, steps, texture size, CFG), calibrated from measured face counts and A/B-tested settings rather than arbitrary numbers.
 - **Granular progress reporting** — per-diffusion-step progress in the UI instead of a single stalled bar for the whole shape or texture pass.
+- **Built-in postprocessing filters** — Riso, Dither, Stipple, 3d Mosh, Halftone, Haring,  .
+- **Built-in PNG export** — high resolution, no need for external 3d software just to get an image.
+
 
 ---
 
