@@ -21,6 +21,9 @@ Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 ## What's new in m3dium
 
 - **Zero manual model setup** — shape, paint, delight, SD Turbo, and the CLIP subject classifier all download automatically from Hugging Face on first use and are cached locally — no manual checkpoint placement, no config editing, whether you're running the packaged app or from source.
+- **Lowpoly / Draft / Normal / High presets** — one-click combinations tuning geometry (reduction target, octree resolution) together with paint settings (resolution, steps, texture size, CFG), calibrated from measured face counts and A/B-tested settings rather than arbitrary numbers.
+- **Built-in postprocessing filters** — Riso, Dither, Stipple, 3d Mosh, Halftone, Haring, Fresnel (heuristic), Checkerboard.
+- **Built-in PNG export** — high resolution, no need for external 3d software just to get an image.
 - **Standalone macOS app** — the same UI packaged as a double-clickable `.app`/`.dmg` with a menu bar helper (no Terminal window, no Dock icon). See [Releases](../../releases) for a prebuilt build, or `scripts/build_app.sh` to build your own.
 - **Gradio UI** (`app.py`) — Image-to-3D and Text-to-3D tabs, covering shape generation, texturing, polygon reduction, and upscaling without touching a terminal.
 - **Polygon reduction** — Inserts a remesh step inside the main pipeline, resulting in a cleaner mesh and correct lowpoly UV.
@@ -29,10 +32,7 @@ Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
 - **Swift/MLX shape backend** — shape generation defaults to a native Swift binary (~4x faster than PyTorch at the same settings), with an in-process cache keeping it loaded across generations; falls back to PyTorch automatically if not built locally.
 - **Swift/MLX paint backend** — paint can also run end-to-end (UV unwrap through baking) on the same native Swift binary instead of the PyTorch/hybrid-MLX pipeline, avoiding per-step PyTorch↔MLX conversion overhead. Each generation currently runs as its own subprocess, so unlike the shape backend it reloads weights from disk every run rather than staying warm in memory.
 - **Upscale texture pass** — an optional latent generative touch-up applied per-view before baking.
-- **Lowpoly / Draft / Normal / High presets** — one-click combinations tuning geometry (reduction target, octree resolution) together with paint settings (resolution, steps, texture size, CFG), calibrated from measured face counts and A/B-tested settings rather than arbitrary numbers.
 - **Granular progress reporting** — per-diffusion-step progress in the UI instead of a single stalled bar for the whole shape or texture pass.
-- **Built-in postprocessing filters** — Riso, Dither, Stipple, 3d Mosh, Halftone, Haring,  .
-- **Built-in PNG export** — high resolution, no need for external 3d software just to get an image.
 
 
 ---
