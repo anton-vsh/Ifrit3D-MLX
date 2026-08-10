@@ -1,5 +1,4 @@
 <img width="1920" height="879" alt="m3dium-head" src="https://github.com/user-attachments/assets/269785ab-6a6b-4785-8c89-89fa1516d2a5" />
-
 Fast 3d generation for graphic designers. Includes image to 3d and text to 3d, built in postprocessing and png export — no need for additional 3d software. Apple native architecture.
 
 
@@ -7,13 +6,8 @@ Fast 3d generation for graphic designers. Includes image to 3d and text to 3d, b
 
 Started as a spiritual successor to Luma Genie (RIP) ended up as an ultimate poster asset machine. Not only you can generate those «ugly» (but incredibly cozy) 3D models once again using built-in Stable diffusion turbo (texture-detail passes included), with shape generation running on a native Swift/MLX backend by default — roughly 4x faster than the PyTorch pipeline. As a cherry on top, you can also generate robust lowpoly models and «normal» high poly as well.
 
-<img width="1551" height="892" alt="Снимок экрана — 2026-07-16 в 13 48 36" src="https://github.com/user-attachments/assets/e8829d46-c764-40a5-bbe5-abf3171621a9" />
-
-
-
+<img width="1560" height="773" alt="Снимок экрана — 2026-08-10 в 21 50 48" src="https://github.com/user-attachments/assets/b4d42277-7b39-4c44-aca8-78a17f01a591" />
 Maintained by [Anton Shlyonkin](https://www.shlyonk.in).
-
-<img width="1427" height="474" alt="Снимок экрана — 2026-07-18 в 12 23 50" src="https://github.com/user-attachments/assets/444e3bb8-8ac1-4121-826f-34f0dd7c7fa9" />
 
 
 ---
