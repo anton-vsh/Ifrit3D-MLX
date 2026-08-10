@@ -1,3 +1,8 @@
+<img width="1920" height="879" alt="m3dium-head" src="https://github.com/user-attachments/assets/269785ab-6a6b-4785-8c89-89fa1516d2a5" />
+
+Fast 3d generation for graphic designers. Includes image to 3d and text to 3d, built in postprocessing and png export — no need for additional 3d software. Apple native architecture.
+
+
 # m3dium (mac Os only)
 
 Spiritual successor to Luma Genie (RIP). Now you can generate those «ugly» (but incredibly cozy) 3D models once again (texture-detail passes included), with shape generation running on a native Swift/MLX backend by default — roughly 4x faster than the PyTorch fallback. As a cherry on the cake, you can also generate robust lowpoly models and «normal» high poly aswell.
