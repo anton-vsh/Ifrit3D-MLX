@@ -2,7 +2,7 @@
 Fast 3d generation for graphic designers. Includes image to 3d and text to 3d, built in postprocessing and png export — no need for additional 3d software. Apple native architecture.
 
 
-# m3dium (Apple Silicon only — formerly Ifrit 3d)
+# m3dium (Apple Silicon, for now ONLY macOs Tahoe)
 
 Started as a spiritual successor to Luma Genie (RIP) ended up as an ultimate poster asset machine. Not only you can generate those «ugly» (but incredibly cozy) 3D models once again using built-in Stable diffusion turbo (texture-detail passes included), with shape generation running on a native Swift/MLX backend by default — roughly 4x faster than the PyTorch pipeline. As a cherry on top, you can also generate robust lowpoly models and «normal» high poly as well.
 
