@@ -80,7 +80,12 @@ _sd_pipeline_mode = None  # "text2img" or "img2img"
 _sd_lock = threading.Lock()
 
 
-SD_MODEL_PATH = str(ROOT / "models" / "sd-turbo")
+def _sd_model_path():
+    from sd_turbo import sd_turbo_path
+    return str(sd_turbo_path())
+
+
+SD_MODEL_PATH = _sd_model_path()
 
 
 def _unload_sd_pipeline():
@@ -97,7 +102,7 @@ def _unload_sd_pipeline():
         print("[app] SD pipeline unloaded, MPS memory freed")
 
 
-def _load_sd_pipeline(img2img=True):
+def _load_sd_pipeline(img2img=True, progress_callback=None):
     global _sd_pipeline, _sd_pipeline_mode
     mode = "img2img" if img2img else "text2img"
     if _sd_pipeline is not None and _sd_pipeline_mode == mode:
@@ -106,7 +111,9 @@ def _load_sd_pipeline(img2img=True):
         if _sd_pipeline is not None and _sd_pipeline_mode == mode:
             return _sd_pipeline
         import torch
+        from sd_turbo import ensure_sd_turbo
         from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image
+        ensure_sd_turbo(progress_callback=progress_callback)
         pipeline_cls = AutoPipelineForImage2Image if img2img else AutoPipelineForText2Image
         _sd_pipeline = pipeline_cls.from_pretrained(
             SD_MODEL_PATH,
@@ -124,7 +131,7 @@ def generate_image(prompt, sd_steps, progress=gr.Progress()):
     import torch
 
     progress(0, desc="Loading SD Turbo...")
-    pipe = _load_sd_pipeline(img2img=False)
+    pipe = _load_sd_pipeline(img2img=False, progress_callback=_scaled_progress(progress, 0, 0.3))
 
     progress(0.3, desc=f"Generating ({sd_steps} steps)...")
     start = time.time()

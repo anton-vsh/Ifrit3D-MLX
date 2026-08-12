@@ -564,73 +564,6 @@ wheels = [
 ]
 
 [[package]]
-name = "m3dium"
-version = "0.3.5"
-source = { virtual = "." }
-dependencies = [
-    { name = "accelerate" },
-    { name = "cumesh" },
-    { name = "diffusers" },
-    { name = "einops" },
-    { name = "flex-gemm" },
-    { name = "gradio" },
-    { name = "huggingface-hub" },
-    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "mtlbvh" },
-    { name = "mtldiffrast" },
-    { name = "ninja" },
-    { name = "numpy" },
-    { name = "omegaconf" },
-    { name = "onnxruntime" },
-    { name = "opencv-python" },
-    { name = "pillow" },
-    { name = "pybind11" },
-    { name = "pygltflib" },
-    { name = "pymeshlab" },
-    { name = "rembg" },
-    { name = "rtree" },
-    { name = "rumps", marker = "sys_platform == 'darwin'" },
-    { name = "torch" },
-    { name = "torchvision" },
-    { name = "tqdm" },
-    { name = "transformers" },
-    { name = "trimesh" },
-    { name = "xatlas" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate" },
-    { name = "cumesh", directory = "libraries/mtlmesh" },
-    { name = "diffusers" },
-    { name = "einops" },
-    { name = "flex-gemm", directory = "libraries/mtlgemm" },
-    { name = "gradio", specifier = ">=6.19.0" },
-    { name = "huggingface-hub", specifier = ">=1.11.0" },
-    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "mtlbvh", directory = "libraries/mtlbvh" },
-    { name = "mtldiffrast", directory = "libraries/mtldiffrast" },
-    { name = "ninja" },
-    { name = "numpy" },
-    { name = "omegaconf" },
-    { name = "onnxruntime" },
-    { name = "opencv-python" },
-    { name = "pillow" },
-    { name = "pybind11" },
-    { name = "pygltflib" },
-    { name = "pymeshlab" },
-    { name = "rembg" },
-    { name = "rtree", specifier = ">=1.4.1" },
-    { name = "rumps", marker = "sys_platform == 'darwin'" },
-    { name = "torch" },
-    { name = "torchvision" },
-    { name = "tqdm", specifier = ">=4.66.3" },
-    { name = "transformers", specifier = ">=4.48.0" },
-    { name = "trimesh" },
-    { name = "xatlas" },
-]
-
-[[package]]
 name = "imageio"
 version = "2.37.3"
 source = { registry = "https://pypi.org/simple" }
@@ -720,6 +653,73 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/11/03/16090dd6f74ba2b8b922276047f15962fbeea0a75d5601607edb301ba945/llvmlite-0.47.0-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:fa1cbd800edd3b20bc141521f7fd45a6185a5b84109aa6855134e81397ffe72b", size = 56275178, upload-time = "2026-03-31T18:29:42.58Z" },
     { url = "https://files.pythonhosted.org/packages/f5/cb/0abf1dd4c5286a95ffe0c1d8c67aec06b515894a0dd2ac97f5e27b82ab0b/llvmlite-0.47.0-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f6725179b89f03b17dabe236ff3422cb8291b4c1bf40af152826dfd34e350ae8", size = 55128632, upload-time = "2026-03-31T18:29:46.939Z" },
     { url = "https://files.pythonhosted.org/packages/4f/79/d3bbab197e86e0ff4f9c07122895b66a3e0d024247fcff7f12c473cb36d9/llvmlite-0.47.0-cp314-cp314t-win_amd64.whl", hash = "sha256:6842cf6f707ec4be3d985a385ad03f72b2d724439e118fcbe99b2929964f0453", size = 39153839, upload-time = "2026-03-31T18:29:51.004Z" },
+]
+
+[[package]]
+name = "m3dium"
+version = "0.5.11"
+source = { virtual = "." }
+dependencies = [
+    { name = "accelerate" },
+    { name = "cumesh" },
+    { name = "diffusers" },
+    { name = "einops" },
+    { name = "flex-gemm" },
+    { name = "gradio" },
+    { name = "huggingface-hub" },
+    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "mtlbvh" },
+    { name = "mtldiffrast" },
+    { name = "ninja" },
+    { name = "numpy" },
+    { name = "omegaconf" },
+    { name = "onnxruntime" },
+    { name = "opencv-python" },
+    { name = "pillow" },
+    { name = "pybind11" },
+    { name = "pygltflib" },
+    { name = "pymeshlab" },
+    { name = "rembg" },
+    { name = "rtree" },
+    { name = "rumps", marker = "sys_platform == 'darwin'" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "tqdm" },
+    { name = "transformers" },
+    { name = "trimesh" },
+    { name = "xatlas" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate" },
+    { name = "cumesh", directory = "libraries/mtlmesh" },
+    { name = "diffusers" },
+    { name = "einops" },
+    { name = "flex-gemm", directory = "libraries/mtlgemm" },
+    { name = "gradio", specifier = ">=6.19.0" },
+    { name = "huggingface-hub", specifier = ">=1.11.0" },
+    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "mtlbvh", directory = "libraries/mtlbvh" },
+    { name = "mtldiffrast", directory = "libraries/mtldiffrast" },
+    { name = "ninja" },
+    { name = "numpy" },
+    { name = "omegaconf" },
+    { name = "onnxruntime" },
+    { name = "opencv-python" },
+    { name = "pillow" },
+    { name = "pybind11" },
+    { name = "pygltflib" },
+    { name = "pymeshlab" },
+    { name = "rembg" },
+    { name = "rtree", specifier = ">=1.4.1" },
+    { name = "rumps", marker = "sys_platform == 'darwin'" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "tqdm", specifier = ">=4.66.3" },
+    { name = "transformers", specifier = ">=4.48.0" },
+    { name = "trimesh" },
+    { name = "xatlas" },
 ]
 
 [[package]]

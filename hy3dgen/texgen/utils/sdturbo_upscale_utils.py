@@ -41,14 +41,12 @@ class SDTurboUpscaler():
         self.steps = int(os.environ.get('HY3D_SUPER_RES_STEPS', '8'))
 
         from diffusers import AutoPipelineForImage2Image
+        from sd_turbo import ensure_sd_turbo, sd_turbo_path
 
-        model_path = os.environ.get(
-            'HY3D_SD_TURBO_PATH',
-            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__))))), 'models', 'sd-turbo'),
-        )
+        model_path = os.environ.get('HY3D_SD_TURBO_PATH', str(sd_turbo_path()))
         if progress_callback is not None:
             progress_callback(0.0, "Loading SD Turbo for texture upscale...")
+        ensure_sd_turbo(progress_callback=progress_callback)
         self.pipe = AutoPipelineForImage2Image.from_pretrained(
             model_path,
             torch_dtype=torch.float16,

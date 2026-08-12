@@ -205,7 +205,7 @@ def run_swift_paint(
             texture_size = sd_res
 
         os.environ["HY3D_SUPER_RES_STRENGTH"] = str(sd_strength)
-        upscaler = SDTurboUpscaler(_SDConfig())
+        upscaler = SDTurboUpscaler(_SDConfig(), progress_callback=progress_callback)
 
         sd_dir.mkdir(parents=True, exist_ok=True)
         t_sd0 = time.time()

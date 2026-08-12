@@ -58,7 +58,7 @@ cp -RL ".venv/lib/python$PY_VERSION/site-packages" "$APP_BUNDLE/Contents/Resourc
 echo "==> Copying application source"
 cp -R hy3dgen "$APP_BUNDLE/Contents/Resources/app/"
 cp -R shape "$APP_BUNDLE/Contents/Resources/app/"
-cp app.py main.py hf_progress.py "$APP_BUNDLE/Contents/Resources/app/"
+cp app.py main.py hf_progress.py sd_turbo.py "$APP_BUNDLE/Contents/Resources/app/"
 cp scripts/menubar_helper.py "$APP_BUNDLE/Contents/Resources/app/"
 
 if [ -x "swift/bin/hy3d" ]; then

@@ -154,6 +154,17 @@ source of truth; nothing gets compiled on an end user's machine either way.
   remover downloads via its own `pooch`-based downloader, entirely outside
   `huggingface_hub` — no real byte-level progress is available for it, only a
   before-the-call announcement.
+- **`build_app.sh` does NOT bundle `models/sd-turbo`** — the SD Turbo checkpoint
+  (used by both the Text-to-3D text2img step *and* the SD-Turbo texture upscale
+  pass) is ~2.4GB fp16 and would bloat the signed bundle. `sd_turbo.py` resolves
+  it to the writable app-support location (sibling of `HY3DGEN_MODELS`, same
+  convention as `swift_runner.py`) and `ensure_sd_turbo()` downloads it on first
+  use via `snapshot_download` (fp16 files only, wrapped in `report_hf_downloads`).
+  Both loaders use `local_files_only=True`, so without that download a missing
+  dir is an *instant* OSError, not a hang — and neither SD path is what a
+  "reaches 5% and freezes" report means: the 5% mark is the shape weights
+  download (`progress(0.05, ...)` in `generate()`), which had no progress
+  feedback before the `hf_progress.py` fix.
 - **Don't guess-fix reference algorithm ports.** The 3D Mosh filter went through
   several wrong "fixes" (BFS-based patch selection, unwelding the mesh) based on
   plausible-sounding theories that turned out wrong once actually tested against
