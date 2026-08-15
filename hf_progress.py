@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import time
 
 
 @contextmanager
@@ -56,19 +57,44 @@ def report_hf_downloads(progress_callback, desc="Downloading model weights (firs
             # sets `unit`/`desc` (tqdm/std.py), so record them ourselves.
             self._cb_n = kwargs.get("initial", 0)
             self._cb_unit = kwargs.get("unit", "")
+            self._cb_reported_initial = False
+            self._cb_last_report_n = self._cb_n
+            self._cb_last_report_time = 0.0
             kwargs["disable"] = True
             super().__init__(*args, **kwargs)
             self.unit = self._cb_unit
 
         def update(self, n=1):
-            if n > 0:
-                self._cb_n += n
+            # huggingface_hub/tqdm emits a large burst of update(0) calls
+            # while its download workers are being set up. Passing every one
+            # through to Gradio floods the event queue before a single byte is
+            # received: the UI appears stuck at the outer shape stage (5%).
+            # Keep one initial status message, then ignore zero-byte refreshes.
+            if n <= 0:
+                if self._cb_unit == "B" and not self._cb_reported_initial:
+                    total = getattr(self, "total", None) or 0
+                    if total > 0:
+                        mb_total = total / (1024 * 1024)
+                        progress_callback(0.0, f"{desc}: 0/{mb_total:.0f} MB")
+                    self._cb_reported_initial = True
+                return
+
+            self._cb_n += n
             total = getattr(self, "total", None) or 0
             if self._cb_unit == "B" and total > 0:
                 frac = min(1.0, self._cb_n / total)
-                mb_done = self._cb_n / (1024 * 1024)
-                mb_total = total / (1024 * 1024)
-                progress_callback(frac, f"{desc}: {mb_done:.0f}/{mb_total:.0f} MB")
+                now = time.monotonic()
+                # A callback per network chunk is also excessive for Gradio.
+                # Report every 0.2% at most, with a time-based fallback for
+                # slow links and a guaranteed final update.
+                changed_enough = self._cb_n - self._cb_last_report_n >= max(1, total // 500)
+                if changed_enough or now - self._cb_last_report_time >= 0.5 or frac >= 1.0:
+                    mb_done = self._cb_n / (1024 * 1024)
+                    mb_total = total / (1024 * 1024)
+                    progress_callback(frac, f"{desc}: {mb_done:.0f}/{mb_total:.0f} MB")
+                    self._cb_reported_initial = True
+                    self._cb_last_report_n = self._cb_n
+                    self._cb_last_report_time = now
             # deliberately no super().update(): disable=True would make it a
             # no-op anyway, and calling refresh() risks the class-lock deadlock.
 
